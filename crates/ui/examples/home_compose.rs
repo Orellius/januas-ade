@@ -89,7 +89,11 @@ const TAB_GAP: f32 = 9.0;
 const TAB_RAIL_W: f32 = 2.0;
 const TAB_RAIL_H: f32 = 16.0;
 const TAB_DOT_DIAMETER: f32 = 7.0;
-const TAB_CLOSE_BOX: f32 = 14.0;
+/// `×` close button outer box. Matches `add_tab_button`'s 28×28 and the
+/// Home button's 28-tall band so the three subway controls share one
+/// horizontal centerline. Above `tokens::hit::MIN` from `design-scaling.md`
+/// §4 (24px WCAG 2.5.8 floor).
+const TAB_CLOSE_BOX: f32 = 28.0;
 const TAB_OUTER_H: f32 = 28.0;
 /// Fixed chrome contribution to a tab's width: padding + rail + dot + close
 /// box + the four inter-child gaps. The dynamic part is `name_w + kind_w`.
@@ -260,10 +264,10 @@ fn try_launcher_kind(node_id: NodeId) -> Option<ModuleKind> {
 
 fn title_for(selection: Selection, set: &InstanceSet) -> String {
     match selection {
-        Selection::Home => "januas · home".to_string(),
+        Selection::Home => "JANUAS · HOME".to_string(),
         Selection::Tab(id) => set.get(id).map_or_else(
-            || "januas".to_string(),
-            |inst| format!("januas · {}", inst.name.to_lowercase()),
+            || "JANUAS".to_string(),
+            |inst| format!("JANUAS · {}", inst.name.to_uppercase()),
         ),
     }
 }
@@ -308,7 +312,11 @@ fn titlebar(renderer: &mut Renderer, logo: ImageId, title: &str) -> Node {
 
 // ===== Subway: Home button + divider + dynamic tabs + add =====
 
-fn home_button(renderer: &mut Renderer, logo: ImageId, hovered: bool, active: bool) -> Node {
+/// Home button — accent-colored `⌂` glyph + "Home" label. The icon comes
+/// from the system mono font (Unicode U+2302), so it ships sharp at any
+/// scale through the existing cosmic-text atlas without a PNG render.
+/// Matches the `▦`/`▮` style of the launcher icons.
+fn home_button(renderer: &mut Renderer, hovered: bool, active: bool) -> Node {
     let bg = if active {
         rounded(tokens::SURFACE_PANEL, 1.0, radii::MD)
     } else if hovered {
@@ -317,7 +325,8 @@ fn home_button(renderer: &mut Renderer, logo: ImageId, hovered: bool, active: bo
         rounded(tokens::SURFACE_BASE, 0.0, radii::MD)
     };
 
-    let logo_node = Node::image([16.0, 16.0], ImageStyle::new(logo).with_radius(4.0));
+    let icon = text_node(renderer, "⌂", TextFamily::Mono, 15.0, tokens::ACCENT, 0xff);
+    let icon_w = icon.size[0];
     let label = text_node(
         renderer,
         "Home",
@@ -342,8 +351,8 @@ fn home_button(renderer: &mut Renderer, logo: ImageId, hovered: bool, active: bo
         })
         .with_cross_align(CrossAlign::Center)
         .with_background(bg)
-        .with_children([logo_node, label]);
-    Node::stack([10.0 + 16.0 + 8.0 + label_w + 12.0, 28.0], inner).with_id(HOME_BTN)
+        .with_children([icon, label]);
+    Node::stack([10.0 + icon_w + 8.0 + label_w + 12.0, 28.0], inner).with_id(HOME_BTN)
 }
 
 fn tab_node(
@@ -413,33 +422,35 @@ fn tab_node(
     Node::stack([intrinsic_w, TAB_OUTER_H], content).with_id(tab_node_id(inst.id))
 }
 
-/// Compact `×` glyph that closes its parent tab. Painted after the tab body
-/// so its hit-zone wins under the reverse-painter hit-test, even though it
-/// sits inside the tab's outer hit region.
+/// `×` close button — 28×28 rounded squircle, transparent at rest, with a
+/// `SURFACE_RAISED` background on hover (matches `add_tab_button` and
+/// `home_button` so all three subway controls share one horizontal
+/// centerline). Painted after the tab body so its hit-zone wins under the
+/// reverse-painter hit-test.
 fn close_button(renderer: &mut Renderer, instance: InstanceId, hovered: bool) -> Node {
-    let color = if hovered {
+    let bg = if hovered {
+        rounded(tokens::SURFACE_RAISED, 1.0, radii::MD)
+    } else {
+        rounded(tokens::SURFACE_BASE, 0.0, radii::MD)
+    };
+    let glyph_color = if hovered {
         tokens::TEXT
     } else {
         tokens::TEXT_FAINT
     };
-    let glyph = text_node(renderer, "×", TextFamily::Mono, 13.0, color, 0xff);
+    let glyph = text_node(renderer, "×", TextFamily::Mono, 13.0, glyph_color, 0xff);
     let [gw, gh] = glyph.size;
-    Node::stack(
-        [TAB_CLOSE_BOX, TAB_CLOSE_BOX],
-        Stack::row()
+    let centered = Node::stack(
+        [gw, gh],
+        Stack::column()
             .with_cross_align(CrossAlign::Center)
-            .with_children([
-                spacer(1.0),
-                Node::stack(
-                    [gw, gh],
-                    Stack::column()
-                        .with_cross_align(CrossAlign::Center)
-                        .with_children([spacer(1.0), glyph, spacer(1.0)]),
-                ),
-                spacer(1.0),
-            ]),
-    )
-    .with_id(tab_close_node_id(instance))
+            .with_children([spacer(1.0), glyph, spacer(1.0)]),
+    );
+    let inner = Stack::row()
+        .with_cross_align(CrossAlign::Center)
+        .with_background(bg)
+        .with_children([spacer(1.0), centered, spacer(1.0)]);
+    Node::stack([TAB_CLOSE_BOX, TAB_CLOSE_BOX], inner).with_id(tab_close_node_id(instance))
 }
 
 fn add_tab_button(renderer: &mut Renderer, hovered: bool) -> Node {
@@ -468,12 +479,7 @@ fn add_tab_button(renderer: &mut Renderer, hovered: bool) -> Node {
     Node::stack([28.0, 28.0], inner).with_id(TAB_ADD)
 }
 
-fn subway(
-    renderer: &mut Renderer,
-    logo: ImageId,
-    set: &InstanceSet,
-    pointer: &PointerState,
-) -> Node {
+fn subway(renderer: &mut Renderer, set: &InstanceSet, pointer: &PointerState) -> Node {
     let selection = set.selected();
     let home_active = selection == Selection::Home;
     let home_hovered = pointer.hovered == Some(HOME_BTN);
@@ -482,7 +488,7 @@ fn subway(
 
     // Materialize each section before chaining — `renderer` is `&mut` and
     // can only be in one closure at a time.
-    let home = home_button(renderer, logo, home_hovered, home_active);
+    let home = home_button(renderer, home_hovered, home_active);
     let tabs: Vec<Node> = set
         .ordered()
         .map(|inst| {
@@ -795,7 +801,7 @@ fn build_root(
         .with_children([
             titlebar(renderer, logo, &title),
             divider(viewport[0]),
-            subway(renderer, logo, set, pointer),
+            subway(renderer, set, pointer),
             divider(viewport[0]),
             hero(renderer, logo, set, pointer),
             divider(viewport[0]),
