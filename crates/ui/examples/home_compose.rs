@@ -25,6 +25,8 @@ use januas_ui::{
 };
 use tracing::warn;
 use tracing_subscriber::EnvFilter;
+#[cfg(target_os = "macos")]
+use winit::platform::macos::WindowAttributesExtMacOS as _;
 use winit::{
     application::ApplicationHandler,
     dpi::PhysicalPosition,
@@ -206,19 +208,18 @@ fn divider(viewport_w: f32) -> Node {
 }
 
 // ===== Titlebar =====
+//
+// On macOS, winit's WindowAttributesExtMacOS hides the OS titlebar chrome
+// and extends the content view under the standard window-control cluster
+// (red/amber/green close/min/max dots). Those dots paint ON TOP of our
+// titlebar at fixed positions starting ~11px from the left edge; the
+// cluster spans roughly 63px. We leave 78px of empty reserve on the left
+// (and a matching reserve on the right) so the center title sits visually
+// centered against the OS-drawn dots without us re-painting them.
 
-fn traffic_dots() -> Node {
-    let dot = |color: [u8; 3]| circle(11.0, color);
-    let inner = Stack::row()
-        .with_gap(7.0)
-        .with_cross_align(CrossAlign::Center)
-        .with_children(vec![
-            dot(palette::TRAFFIC_RED),
-            dot(palette::TRAFFIC_AMBER),
-            dot(palette::TRAFFIC_GREEN),
-        ]);
-    Node::stack([11.0_f32.mul_add(3.0, 7.0 * 2.0), 11.0], inner)
-}
+/// Width of the macOS native traffic-light cluster plus a little breathing
+/// room. Token-shaped so the next titlebar surface can reuse it.
+const MACOS_TRAFFIC_RESERVE: f32 = 78.0;
 
 fn titlebar_center(renderer: &mut Renderer, logo: ImageId) -> Node {
     let logo_node = Node::image([14.0, 14.0], ImageStyle::new(logo).with_radius(3.0));
@@ -246,13 +247,14 @@ fn titlebar(renderer: &mut Renderer, logo: ImageId) -> Node {
         .with_padding(EdgeInsets::symmetric(0.0, 12.0))
         .with_cross_align(CrossAlign::Center)
         .with_children(vec![
-            traffic_dots(),
+            // Left reserve — native macOS traffic-light buttons paint here.
+            Node::rect([MACOS_TRAFFIC_RESERVE, 1.0], RectStyle::fill([0.0; 4])),
             spacer(1.0),
             center,
             spacer(1.0),
-            // Symmetric right-side reserve so the title sits visually centered
-            // against the traffic dots on the left.
-            Node::rect([54.0, 1.0], RectStyle::fill([0.0; 4])),
+            // Symmetric right reserve so the title sits visually centered
+            // against the native cluster on the left.
+            Node::rect([MACOS_TRAFFIC_RESERVE, 1.0], RectStyle::fill([0.0; 4])),
         ]);
     Node::stack([0.0, TITLEBAR_H], row)
 }
@@ -690,6 +692,16 @@ impl ApplicationHandler for HomeApp {
                 DEFAULT_LOGICAL_W,
                 DEFAULT_LOGICAL_H,
             ));
+        // macOS unified-titlebar pattern (Warp / VS Code / Linear-desktop):
+        // keep the titlebar PRESENT so AppKit keeps drawing the native
+        // traffic-light buttons, but make its background transparent and
+        // extend our content view up under it. `titlebar_hidden(true)`
+        // hides the buttons too — wrong knob.
+        #[cfg(target_os = "macos")]
+        let attrs = attrs
+            .with_titlebar_transparent(true)
+            .with_fullsize_content_view(true)
+            .with_title_hidden(true);
         let window = match event_loop.create_window(attrs) {
             Ok(w) => Arc::new(w),
             Err(e) => {
