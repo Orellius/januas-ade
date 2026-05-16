@@ -105,10 +105,16 @@ pub struct RectStyle {
     pub border_width: f32,
     /// Corner radius in pixels.
     pub radius: f32,
+    /// Linear-space RGBA shadow color. Alpha `0.0` disables the shadow.
+    pub shadow_color: [f32; 4],
+    /// Shadow offset in pixels; positive y casts the shadow downward.
+    pub shadow_offset: [f32; 2],
+    /// Gaussian blur sigma in pixels.
+    pub shadow_blur: f32,
 }
 
 impl RectStyle {
-    /// Flat fill, no border, no rounding. Useful as a starting point.
+    /// Flat fill, no border, no rounding, no shadow.
     #[must_use]
     pub const fn fill(color: [f32; 4]) -> Self {
         Self {
@@ -116,7 +122,19 @@ impl RectStyle {
             border: [0.0; 4],
             border_width: 0.0,
             radius: 0.0,
+            shadow_color: [0.0; 4],
+            shadow_offset: [0.0; 2],
+            shadow_blur: 0.0,
         }
+    }
+
+    /// Builder: attach a soft drop shadow.
+    #[must_use]
+    pub const fn with_shadow(mut self, color: [f32; 4], offset: [f32; 2], blur: f32) -> Self {
+        self.shadow_color = color;
+        self.shadow_offset = offset;
+        self.shadow_blur = blur;
+        self
     }
 }
 
@@ -328,6 +346,9 @@ impl LayoutFrame {
             r.size[1] *= scale;
             r.radius *= scale;
             r.border_width *= scale;
+            r.shadow_offset[0] *= scale;
+            r.shadow_offset[1] *= scale;
+            r.shadow_blur *= scale;
         }
         for t in &mut self.texts {
             t.pos[0] *= scale;
@@ -397,6 +418,9 @@ fn place_stack(frame: &mut LayoutFrame, stack: &Stack, origin: [f32; 2], size: [
             border_width: style.border_width,
             fill: style.fill,
             border: style.border,
+            shadow_color: style.shadow_color,
+            shadow_offset: style.shadow_offset,
+            shadow_blur: style.shadow_blur,
         });
     }
 
@@ -476,6 +500,9 @@ fn place_node(frame: &mut LayoutFrame, node: &Node, pos: [f32; 2], size: [f32; 2
                 border_width: style.border_width,
                 fill: style.fill,
                 border: style.border,
+                shadow_color: style.shadow_color,
+                shadow_offset: style.shadow_offset,
+                shadow_blur: style.shadow_blur,
             });
         }
         NodeKind::Text(style, content) => {

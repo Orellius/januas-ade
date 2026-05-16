@@ -74,6 +74,9 @@ fn build_grid() -> Vec<Rect> {
                 border_width: TILE_BORDER,
                 fill,
                 border,
+                shadow_color: [0.0; 4],
+                shadow_offset: [0.0; 2],
+                shadow_blur: 0.0,
             });
         }
     }

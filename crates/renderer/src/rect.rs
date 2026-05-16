@@ -45,6 +45,13 @@ pub struct Rect {
     pub fill: [f32; 4],
     /// Linear-space RGBA border color; ignored when `border_width == 0.0`.
     pub border: [f32; 4],
+    /// Linear-space RGBA shadow color. Alpha `0.0` disables the shadow.
+    pub shadow_color: [f32; 4],
+    /// Shadow offset in surface pixels; positive y casts the shadow downward.
+    pub shadow_offset: [f32; 2],
+    /// Gaussian blur sigma in surface pixels. The shader expands the drawn
+    /// quad outward by `3 × blur` so the shadow halo fits.
+    pub shadow_blur: f32,
 }
 
 /// GPU-side instance layout — host mirror of the WGSL vertex-input attributes
@@ -58,6 +65,10 @@ struct RectInstance {
     border_width: f32,
     fill: [f32; 4],
     border: [f32; 4],
+    shadow_color: [f32; 4],
+    shadow_offset: [f32; 2],
+    shadow_blur: f32,
+    _pad: f32,
 }
 
 impl From<Rect> for RectInstance {
@@ -69,6 +80,10 @@ impl From<Rect> for RectInstance {
             border_width: r.border_width,
             fill: r.fill,
             border: r.border,
+            shadow_color: r.shadow_color,
+            shadow_offset: r.shadow_offset,
+            shadow_blur: r.shadow_blur,
+            _pad: 0.0,
         }
     }
 }
@@ -175,6 +190,21 @@ impl RectPipeline {
                 offset: 40,
                 shader_location: 5,
                 format: wgpu::VertexFormat::Float32x4,
+            },
+            wgpu::VertexAttribute {
+                offset: 56,
+                shader_location: 6,
+                format: wgpu::VertexFormat::Float32x4,
+            },
+            wgpu::VertexAttribute {
+                offset: 72,
+                shader_location: 7,
+                format: wgpu::VertexFormat::Float32x2,
+            },
+            wgpu::VertexAttribute {
+                offset: 80,
+                shader_location: 8,
+                format: wgpu::VertexFormat::Float32,
             },
         ];
         let instance_layout = wgpu::VertexBufferLayout {
