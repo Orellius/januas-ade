@@ -1,3 +1,7 @@
+<p align="center">
+  <img src="./assets/januas-ade-logo.png" alt="Januas ADE logo" width="180" />
+</p>
+
 # Januas ADE
 
 Native Rust Agentic Development Environment. GPU-rendered terminal multiplexer with wizard-driven setup for AI-coding sessions. Pure Rust, no framework reliance, homegrown ecosystem. 1000 fps render target.
