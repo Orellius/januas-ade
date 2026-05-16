@@ -22,6 +22,10 @@
 
 pub use januas_renderer::{Rect, TextRun};
 
+mod pointer;
+
+pub use pointer::{HitZone, NodeId, PointerState, hit_test};
+
 /// Stack main-axis direction.
 #[derive(Copy, Clone, Debug, PartialEq, Eq)]
 pub enum Direction {
@@ -144,6 +148,10 @@ pub struct Node {
     pub flex: Option<f32>,
     /// The drawable payload — rect, text span, or nested stack.
     pub kind: NodeKind,
+    /// Optional hit-test identity. When set, the layout pass emits a
+    /// [`HitZone`] covering this node's resolved bounds, so the pointer
+    /// state machine can map cursor coordinates back to this node.
+    pub id: Option<NodeId>,
 }
 
 /// Discriminated payload for a [`Node`].
@@ -165,6 +173,7 @@ impl Node {
             size,
             flex: None,
             kind: NodeKind::Rect(style),
+            id: None,
         }
     }
 
@@ -178,6 +187,7 @@ impl Node {
             size,
             flex: None,
             kind: NodeKind::Text(style, content),
+            id: None,
         }
     }
 
@@ -190,6 +200,7 @@ impl Node {
             size,
             flex: None,
             kind: NodeKind::Stack(stack),
+            id: None,
         }
     }
 
@@ -197,6 +208,15 @@ impl Node {
     #[must_use]
     pub const fn with_flex(mut self, weight: f32) -> Self {
         self.flex = Some(weight);
+        self
+    }
+
+    /// Builder: tag this node with a hit-test [`NodeId`]. The layout pass
+    /// emits a [`HitZone`] at the node's resolved bounds so pointer events
+    /// can map back to this node.
+    #[must_use]
+    pub const fn with_id(mut self, id: NodeId) -> Self {
+        self.id = Some(id);
         self
     }
 }
@@ -291,6 +311,37 @@ pub struct LayoutFrame {
     pub rects: Vec<Rect>,
     /// Absolutely-positioned text runs in declaration order.
     pub texts: Vec<TextRun>,
+    /// Hit-test zones in declaration order — later entries paint on top of
+    /// earlier ones, so reverse-iterate to find the topmost hit.
+    pub hit_zones: Vec<HitZone>,
+}
+
+impl LayoutFrame {
+    /// Multiply every position, size, font metric, and hit-zone bound by
+    /// `scale`. Used to convert a logical-pixel layout into the physical
+    /// pixels the renderer surface uses on a `HiDPI` display.
+    pub fn scale_by(&mut self, scale: f32) {
+        for r in &mut self.rects {
+            r.pos[0] *= scale;
+            r.pos[1] *= scale;
+            r.size[0] *= scale;
+            r.size[1] *= scale;
+            r.radius *= scale;
+            r.border_width *= scale;
+        }
+        for t in &mut self.texts {
+            t.pos[0] *= scale;
+            t.pos[1] *= scale;
+            t.font_size *= scale;
+            t.line_height *= scale;
+        }
+        for z in &mut self.hit_zones {
+            z.pos[0] *= scale;
+            z.pos[1] *= scale;
+            z.size[0] *= scale;
+            z.size[1] *= scale;
+        }
+    }
 }
 
 /// Compute absolute pixel positions for every primitive under `root`.
@@ -413,6 +464,9 @@ fn place_stack(frame: &mut LayoutFrame, stack: &Stack, origin: [f32; 2], size: [
 }
 
 fn place_node(frame: &mut LayoutFrame, node: &Node, pos: [f32; 2], size: [f32; 2]) {
+    if let Some(id) = node.id {
+        frame.hit_zones.push(HitZone { id, pos, size });
+    }
     match &node.kind {
         NodeKind::Rect(style) => {
             frame.rects.push(Rect {

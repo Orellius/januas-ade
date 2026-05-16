@@ -1,26 +1,34 @@
-//! S5.5b visual smoke — compose a simplified home-screen frame from the ui
-//! layout primitives, render it through the live `Renderer`.
+//! S5.5b/c interactive smoke — compose a simplified home-screen frame from
+//! the ui layout primitives, render it through the live `Renderer`, route
+//! cursor + mouse events through a pointer state machine.
 //!
-//! Run with `cargo run --release --example home_compose -p januas-ui`. Opens a
-//! 1280×800 window holding four vertical regions (titlebar / subway tabs /
-//! hero / footer). The frame is built once at startup via `ui::layout`; the
-//! event loop just renders it.
+//! Run with `cargo run --release --example home_compose -p januas-ui`. Opens
+//! a 1280×800 logical-size window holding four vertical regions (titlebar /
+//! subway tabs / hero / footer). Cursor over a workspace tab shifts its
+//! background (the design-principles "bg-shift" hover rule); a left click
+//! drops the 2px accent rail onto the clicked tab (the "active" selection
+//! marker per `~/Desktop/Januas/docs/design-principles.md`).
 
 use std::sync::Arc;
 
 use anyhow::{Context as _, Result};
 use januas_renderer::Renderer;
-use januas_ui::{CrossAlign, EdgeInsets, LayoutFrame, Node, RectStyle, Stack, TextStyle, layout};
+use januas_ui::{
+    CrossAlign, EdgeInsets, HitZone, Node, NodeId, NodeKind, PointerState, RectStyle, Stack,
+    TextStyle, layout,
+};
 use tracing::warn;
 use tracing_subscriber::EnvFilter;
 use winit::{
     application::ApplicationHandler,
-    event::WindowEvent,
+    dpi::PhysicalPosition,
+    event::{ElementState, MouseButton, WindowEvent},
     event_loop::{ActiveEventLoop, ControlFlow, EventLoop},
     window::{Window, WindowId},
 };
 
-const VIEWPORT: [f32; 2] = [1280.0, 800.0];
+const DEFAULT_LOGICAL_W: f64 = 1280.0;
+const DEFAULT_LOGICAL_H: f64 = 800.0;
 
 const TITLEBAR_H: f32 = 34.0;
 const SUBWAY_H: f32 = 44.0;
@@ -44,6 +52,18 @@ const TRAFFIC_GAP: f32 = 7.0;
 const HK_CHIP_H: f32 = 18.0;
 const HK_CHIP_RADIUS: f32 = 4.0;
 
+// Hit-test ids — keep stable across rebuilds so PointerState comparisons hold.
+const TAB_PERSONAL: NodeId = 1;
+const TAB_JANUAS_DEV: NodeId = 2;
+const TAB_OSS: NodeId = 3;
+const TAB_FIVEM: NodeId = 4;
+const TAB_ADD: NodeId = 5;
+const MODE_BTN: NodeId = 10;
+
+const fn is_tab(id: NodeId) -> bool {
+    matches!(id, TAB_PERSONAL | TAB_JANUAS_DEV | TAB_OSS | TAB_FIVEM)
+}
+
 fn srgb_u8_to_linear(c: u8) -> f32 {
     #[allow(clippy::cast_lossless, reason = "u8-to-f32 promotion is intentional")]
     let s = c as f32 / 255.0;
@@ -65,7 +85,9 @@ fn linear(rgb: [u8; 3], alpha: f32) -> [f32; 4] {
 
 // Locked Januas tokens — see `~/Desktop/Januas/docs/design-tokens.md`.
 const SURFACE_BASE: [u8; 3] = [0x19, 0x1d, 0x1e];
+const SURFACE_1: [u8; 3] = [0x1e, 0x23, 0x24];
 const SURFACE_2: [u8; 3] = [0x23, 0x2a, 0x2b];
+const SURFACE_3: [u8; 3] = [0x2a, 0x31, 0x32];
 const ACCENT: [u8; 3] = [0x6b, 0xb8, 0xa8];
 const CREAM: [u8; 3] = [0xdd, 0xd2, 0xbb];
 const CREAM_DIM: [u8; 3] = [0x97, 0x90, 0x7f];
@@ -104,6 +126,15 @@ fn text(color: [u8; 3], font_size: f32) -> TextStyle {
     }
 }
 
+fn spacer(weight: f32) -> Node {
+    Node {
+        size: [0.0, 0.0],
+        flex: Some(weight),
+        kind: NodeKind::Rect(flat(SURFACE_BASE, 0.0)),
+        id: None,
+    }
+}
+
 fn titlebar() -> Stack {
     let title_style = text(CREAM_DIM, 11.5);
     Stack::row()
@@ -111,7 +142,6 @@ fn titlebar() -> Stack {
         .with_cross_align(CrossAlign::Center)
         .with_background(flat(SURFACE_BASE, 1.0))
         .with_children(vec![
-            // Traffic-light dots
             Node::stack(
                 [TRAFFIC_DOT.mul_add(3.0, TRAFFIC_GAP * 2.0), TRAFFIC_DOT],
                 Stack::row().with_gap(TRAFFIC_GAP).with_children(vec![
@@ -129,20 +159,9 @@ fn titlebar() -> Stack {
                     ),
                 ]),
             ),
-            // Spacer that pushes the title to center
-            Node {
-                size: [0.0, 0.0],
-                flex: Some(1.0),
-                kind: januas_ui::NodeKind::Rect(flat(SURFACE_BASE, 0.0)),
-            },
+            spacer(1.0),
             Node::text("januas · personal", title_style),
-            // Spacer on the right to balance the dots
-            Node {
-                size: [0.0, 0.0],
-                flex: Some(1.0),
-                kind: januas_ui::NodeKind::Rect(flat(SURFACE_BASE, 0.0)),
-            },
-            // Right-edge invisible reserve, mirrors the traffic-dot width
+            spacer(1.0),
             Node::rect(
                 [TRAFFIC_DOT.mul_add(3.0, TRAFFIC_GAP * 2.0), 1.0],
                 flat(SURFACE_BASE, 0.0),
@@ -150,65 +169,93 @@ fn titlebar() -> Stack {
         ])
 }
 
-fn ws_tab(name: &str, count: &str, active: bool, dot_rgb: [u8; 3]) -> Node {
-    let name_style = text(if active { CREAM } else { CREAM_DIM }, 12.5);
-    let count_style = text(CREAM_FAINT, 10.5);
-    let tab_fill = if active { SURFACE_2 } else { SURFACE_BASE };
-    let tab_w = 110.0;
+fn ws_tab(
+    id: NodeId,
+    name: &str,
+    count: &str,
+    dot_rgb: [u8; 3],
+    pointer: &PointerState,
+    selected: NodeId,
+) -> Node {
+    let is_selected = selected == id;
+    let is_hovered = pointer.hovered == Some(id);
 
-    let mut children = vec![Node::rect([7.0, 7.0], rounded(dot_rgb, 3.5))];
-    if active {
-        // 2px accent rail at the left edge — drawn first so the tab content
-        // overlaps it.
-        children.insert(0, Node::rect([2.0, TAB_H - 12.0], rounded(ACCENT, 1.0)));
+    let name_style = text(if is_selected { CREAM } else { CREAM_DIM }, 12.5);
+    let count_style = text(CREAM_FAINT, 10.5);
+
+    // Background follows the design-principles state machine:
+    //   selected → surface-2 fill (selection chrome)
+    //   hovered (and not selected) → surface-1 fill (the bg-shift hover rule)
+    //   else → transparent
+    let bg = if is_selected {
+        rounded(SURFACE_2, TAB_RADIUS)
+    } else if is_hovered {
+        rounded(SURFACE_1, TAB_RADIUS)
+    } else {
+        flat(SURFACE_BASE, 0.0)
+    };
+
+    let mut children: Vec<Node> = Vec::with_capacity(5);
+    if is_selected {
+        // 2px accent rail at the left edge — the active-state marker per
+        // design-principles.md.
+        children.push(Node::rect([2.0, TAB_H - 12.0], rounded(ACCENT, 1.0)));
     }
+    children.push(Node::rect([7.0, 7.0], rounded(dot_rgb, 3.5)));
     children.push(Node::text(name, name_style));
-    children.push(Node {
-        size: [0.0, 0.0],
-        flex: Some(1.0),
-        kind: januas_ui::NodeKind::Rect(flat(SURFACE_BASE, 0.0)),
-    });
+    children.push(spacer(1.0));
     children.push(Node::text(count, count_style));
 
+    let tab_w = 110.0;
     Node::stack(
         [tab_w, TAB_H],
         Stack::row()
             .with_gap(8.0)
             .with_padding(EdgeInsets::symmetric(0.0, 10.0))
             .with_cross_align(CrossAlign::Center)
-            .with_background(if active {
-                rounded(tab_fill, TAB_RADIUS)
-            } else {
-                flat(SURFACE_BASE, 0.0)
-            })
+            .with_background(bg)
             .with_children(children),
     )
+    .with_id(id)
 }
 
-fn subway() -> Stack {
+fn subway(pointer: &PointerState, selected: NodeId) -> Stack {
+    let add_hover = pointer.hovered == Some(TAB_ADD);
+    let add_bg = if add_hover {
+        bordered(SURFACE_1, CREAM, 0.14, TAB_RADIUS)
+    } else {
+        bordered(SURFACE_BASE, CREAM, 0.09, TAB_RADIUS)
+    };
     Stack::row()
         .with_gap(TAB_GAP)
         .with_padding(EdgeInsets::symmetric(8.0, 12.0))
         .with_cross_align(CrossAlign::Center)
         .with_background(flat(SURFACE_BASE, 1.0))
         .with_children(vec![
-            ws_tab("Personal", "12", true, ACCENT),
-            ws_tab("Januas Dev", "6", false, [0x6f, 0xb8, 0x9c]),
-            ws_tab("OSS", "3", false, [0x6e, 0x9b, 0xd4]),
-            ws_tab("FiveM", "2", false, [0xe8, 0x93, 0x57]),
-            Node {
-                size: [0.0, 0.0],
-                flex: Some(1.0),
-                kind: januas_ui::NodeKind::Rect(flat(SURFACE_BASE, 0.0)),
-            },
-            Node::rect(
-                [TAB_H, TAB_H],
-                bordered(SURFACE_BASE, CREAM, 0.09, TAB_RADIUS),
+            ws_tab(TAB_PERSONAL, "Personal", "12", ACCENT, pointer, selected),
+            ws_tab(
+                TAB_JANUAS_DEV,
+                "Januas Dev",
+                "6",
+                [0x6f, 0xb8, 0x9c],
+                pointer,
+                selected,
             ),
+            ws_tab(TAB_OSS, "OSS", "3", [0x6e, 0x9b, 0xd4], pointer, selected),
+            ws_tab(
+                TAB_FIVEM,
+                "FiveM",
+                "2",
+                [0xe8, 0x93, 0x57],
+                pointer,
+                selected,
+            ),
+            spacer(1.0),
+            Node::rect([TAB_H, TAB_H], add_bg).with_id(TAB_ADD),
         ])
 }
 
-fn hero() -> Stack {
+fn hero(pointer: &PointerState) -> Stack {
     let wordmark_style = text(CREAM, 26.0);
     let meta_style = text(CREAM_FAINT, 10.5);
     let tagline_style = text(CREAM_DIM, 15.0);
@@ -216,9 +263,18 @@ fn hero() -> Stack {
     let mode_sub_style = text(CREAM_DIM, 12.0);
     let mode_kbd_style = text(CREAM_DIM, 11.0);
 
+    let mode_hovered = pointer.hovered == Some(MODE_BTN);
+    let mode_bg = if mode_hovered {
+        // bg-shift to surface-3 + border-color to accent — matches v6
+        // .mode-btn:hover.
+        bordered(SURFACE_3, ACCENT, 1.0, MODE_BTN_RADIUS)
+    } else {
+        bordered(SURFACE_2, CREAM, 0.09, MODE_BTN_RADIUS)
+    };
+
     let logo = Node::rect([LOGO_SIZE, LOGO_SIZE], rounded(SURFACE_2, LOGO_RADIUS));
     let wordmark = Node::text("Januas", wordmark_style);
-    let meta = Node::text("v0.0.0  ·  slice s5.5b  ·  layout primitives", meta_style);
+    let meta = Node::text("v0.0.0  ·  slice s5.5c  ·  pointer state", meta_style);
     let tagline = Node::text(
         "A workspace is a project, a layout, and the CLIs that go with them.",
         tagline_style,
@@ -229,7 +285,7 @@ fn hero() -> Stack {
             .with_gap(14.0)
             .with_padding(EdgeInsets::symmetric(14.0, 16.0))
             .with_cross_align(CrossAlign::Center)
-            .with_background(bordered(SURFACE_2, CREAM, 0.09, MODE_BTN_RADIUS))
+            .with_background(mode_bg)
             .with_children(vec![
                 Node::text("▦", text(ACCENT, 15.0)),
                 Node::stack(
@@ -239,11 +295,7 @@ fn hero() -> Stack {
                         Node::text("project · grid · providers", mode_sub_style),
                     ]),
                 ),
-                Node {
-                    size: [0.0, 0.0],
-                    flex: Some(1.0),
-                    kind: januas_ui::NodeKind::Rect(flat(SURFACE_BASE, 0.0)),
-                },
+                spacer(1.0),
                 Node::stack(
                     [44.0, HK_CHIP_H],
                     Stack::row()
@@ -253,7 +305,8 @@ fn hero() -> Stack {
                         .with_children(vec![Node::text("⌘ T", mode_kbd_style)]),
                 ),
             ]),
-    );
+    )
+    .with_id(MODE_BTN);
 
     Stack::column()
         .with_gap(20.0)
@@ -292,47 +345,39 @@ fn footer() -> Stack {
         .with_cross_align(CrossAlign::Center)
         .with_background(flat(SURFACE_BASE, 1.0))
         .with_children(vec![
-            Node {
-                size: [0.0, 0.0],
-                flex: Some(1.0),
-                kind: januas_ui::NodeKind::Rect(flat(SURFACE_BASE, 0.0)),
-            },
+            spacer(1.0),
             hk_chip("⌘N", "new terminal"),
             hk_chip("⌘D", "split right"),
             hk_chip("⌘K", "command palette"),
             hk_chip("⌘,", "settings"),
-            Node {
-                size: [0.0, 0.0],
-                flex: Some(1.0),
-                kind: januas_ui::NodeKind::Rect(flat(SURFACE_BASE, 0.0)),
-            },
+            spacer(1.0),
         ])
 }
 
-fn build_home_frame() -> LayoutFrame {
-    let root = Stack::column().with_children(vec![
-        Node::stack([VIEWPORT[0], TITLEBAR_H], titlebar()),
+fn build_home_frame(logical_viewport: [f32; 2], pointer: &PointerState, selected: NodeId) -> Stack {
+    Stack::column().with_children(vec![
+        Node::stack([logical_viewport[0], TITLEBAR_H], titlebar()),
         Node::stack(
-            [VIEWPORT[0], 1.0],
+            [logical_viewport[0], 1.0],
             Stack::row().with_background(flat(CREAM, 0.09)),
         ),
-        Node::stack([VIEWPORT[0], SUBWAY_H], subway()),
+        Node::stack([logical_viewport[0], SUBWAY_H], subway(pointer, selected)),
         Node::stack(
-            [VIEWPORT[0], 1.0],
+            [logical_viewport[0], 1.0],
             Stack::row().with_background(flat(CREAM, 0.09)),
         ),
         Node {
-            size: [VIEWPORT[0], 0.0],
+            size: [logical_viewport[0], 0.0],
             flex: Some(1.0),
-            kind: januas_ui::NodeKind::Stack(hero()),
+            kind: NodeKind::Stack(hero(pointer)),
+            id: None,
         },
         Node::stack(
-            [VIEWPORT[0], 1.0],
+            [logical_viewport[0], 1.0],
             Stack::row().with_background(flat(CREAM, 0.09)),
         ),
-        Node::stack([VIEWPORT[0], FOOTER_H], footer()),
-    ]);
-    layout(&root, VIEWPORT)
+        Node::stack([logical_viewport[0], FOOTER_H], footer()),
+    ])
 }
 
 fn main() -> Result<()> {
@@ -356,6 +401,29 @@ fn main() -> Result<()> {
 struct HomeApp {
     window: Option<Arc<Window>>,
     renderer: Option<Renderer>,
+    pointer: PointerState,
+    selected: NodeId,
+    scale: f32,
+    physical_size: [u32; 2],
+    hit_zones: Vec<HitZone>,
+}
+
+impl HomeApp {
+    fn rebuild_and_upload(&mut self) {
+        let Some(renderer) = self.renderer.as_mut() else {
+            return;
+        };
+        #[allow(clippy::cast_precision_loss)]
+        let logical_w = self.physical_size[0] as f32 / self.scale;
+        #[allow(clippy::cast_precision_loss)]
+        let logical_h = self.physical_size[1] as f32 / self.scale;
+        let root = build_home_frame([logical_w, logical_h], &self.pointer, self.selected);
+        let mut frame = layout(&root, [logical_w, logical_h]);
+        frame.scale_by(self.scale);
+        renderer.set_rects(&frame.rects);
+        renderer.set_text_runs(&frame.texts);
+        self.hit_zones = frame.hit_zones;
+    }
 }
 
 impl ApplicationHandler for HomeApp {
@@ -365,7 +433,10 @@ impl ApplicationHandler for HomeApp {
         }
         let attrs = Window::default_attributes()
             .with_title("Januas ADE — home_compose")
-            .with_inner_size(winit::dpi::LogicalSize::new(VIEWPORT[0], VIEWPORT[1]));
+            .with_inner_size(winit::dpi::LogicalSize::new(
+                DEFAULT_LOGICAL_W,
+                DEFAULT_LOGICAL_H,
+            ));
         let window = match event_loop.create_window(attrs) {
             Ok(w) => Arc::new(w),
             Err(e) => {
@@ -374,7 +445,7 @@ impl ApplicationHandler for HomeApp {
                 return;
             }
         };
-        let mut renderer = match Renderer::new(Arc::clone(&window)) {
+        let renderer = match Renderer::new(Arc::clone(&window)) {
             Ok(r) => r,
             Err(e) => {
                 warn!(error = ?e, "renderer init failed");
@@ -383,12 +454,16 @@ impl ApplicationHandler for HomeApp {
             }
         };
 
-        let frame = build_home_frame();
-        renderer.set_rects(&frame.rects);
-        renderer.set_text_runs(&frame.texts);
+        let physical = window.inner_size();
+        #[allow(clippy::cast_possible_truncation)]
+        let scale = window.scale_factor() as f32;
+        self.physical_size = [physical.width.max(1), physical.height.max(1)];
+        self.scale = if scale > 0.0 { scale } else { 1.0 };
+        self.selected = TAB_PERSONAL;
 
         self.renderer = Some(renderer);
         self.window = Some(window);
+        self.rebuild_and_upload();
     }
 
     fn window_event(
@@ -397,15 +472,55 @@ impl ApplicationHandler for HomeApp {
         _window_id: WindowId,
         event: WindowEvent,
     ) {
-        let Some(renderer) = self.renderer.as_mut() else {
-            return;
-        };
         match event {
             WindowEvent::CloseRequested => event_loop.exit(),
-            WindowEvent::Resized(size) => renderer.resize(size.width, size.height),
+            WindowEvent::Resized(size) => {
+                if let Some(r) = self.renderer.as_mut() {
+                    r.resize(size.width, size.height);
+                }
+                self.physical_size = [size.width.max(1), size.height.max(1)];
+                self.rebuild_and_upload();
+            }
+            WindowEvent::ScaleFactorChanged { scale_factor, .. } => {
+                #[allow(clippy::cast_possible_truncation)]
+                let s = scale_factor as f32;
+                self.scale = if s > 0.0 { s } else { 1.0 };
+                self.rebuild_and_upload();
+            }
+            WindowEvent::CursorMoved {
+                position: PhysicalPosition { x, y },
+                ..
+            } => {
+                #[allow(clippy::cast_possible_truncation)]
+                let px = x as f32;
+                #[allow(clippy::cast_possible_truncation)]
+                let py = y as f32;
+                if self.pointer.move_to([px, py], &self.hit_zones) {
+                    self.rebuild_and_upload();
+                }
+            }
+            WindowEvent::CursorLeft { .. } => {
+                if self.pointer.leave() {
+                    self.rebuild_and_upload();
+                }
+            }
+            WindowEvent::MouseInput {
+                state: ElementState::Pressed,
+                button: MouseButton::Left,
+                ..
+            } => {
+                if let Some(id) = self.pointer.hovered {
+                    if is_tab(id) && self.selected != id {
+                        self.selected = id;
+                        self.rebuild_and_upload();
+                    }
+                }
+            }
             WindowEvent::RedrawRequested => {
-                if let Err(e) = renderer.render() {
-                    tracing::error!(error = ?e, "render failed");
+                if let Some(r) = self.renderer.as_mut() {
+                    if let Err(e) = r.render() {
+                        tracing::error!(error = ?e, "render failed");
+                    }
                 }
                 if let Some(window) = &self.window {
                     window.request_redraw();
