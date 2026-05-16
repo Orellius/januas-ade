@@ -25,11 +25,25 @@ use tracing::info;
 use winit::window::Window;
 
 /// Initial smoke string shown before any shell output arrives.
-const INITIAL_TEXT: &str = "Januas ADE — spawning shell…";
+const INITIAL_TEXT: &str = "januas · spawning shell";
 const FONT_SIZE: f32 = 16.0;
 const LINE_HEIGHT: f32 = 20.0;
 /// Rolling-window length (in frames) before the FPS counter logs.
 const FPS_REPORT_INTERVAL_FRAMES: u32 = 600;
+
+// Default-theme tokens — locked in `~/Desktop/Januas/docs/design-tokens.md`.
+// Surface = #191d1e; text = cream #ddd2bb. Hex literals stay verbatim so the
+// codegen path from `design-tokens.md` to a generated `tokens.rs` is obvious
+// when it lands.
+#[allow(clippy::cast_lossless, reason = "u8-to-f64 promotion is intentional")]
+const SURFACE_R: f64 = 0x19_u8 as f64 / 255.0;
+#[allow(clippy::cast_lossless, reason = "u8-to-f64 promotion is intentional")]
+const SURFACE_G: f64 = 0x1d_u8 as f64 / 255.0;
+#[allow(clippy::cast_lossless, reason = "u8-to-f64 promotion is intentional")]
+const SURFACE_B: f64 = 0x1e_u8 as f64 / 255.0;
+const TEXT_R: u8 = 0xdd;
+const TEXT_G: u8 = 0xd2;
+const TEXT_B: u8 = 0xbb;
 
 /// GPU renderer owning the `wgpu` surface, device, queue, and text pipeline.
 ///
@@ -245,7 +259,7 @@ impl Renderer {
                             #[allow(clippy::cast_possible_wrap)]
                             bottom: self.config.height as i32,
                         },
-                        default_color: GlyphColor::rgb(220, 220, 220),
+                        default_color: GlyphColor::rgb(TEXT_R, TEXT_G, TEXT_B),
                         custom_glyphs: &[],
                     }],
                     &mut self.swash_cache,
@@ -285,7 +299,12 @@ impl Renderer {
                     depth_slice: None,
                     resolve_target: None,
                     ops: wgpu::Operations {
-                        load: wgpu::LoadOp::Clear(wgpu::Color::BLACK),
+                        load: wgpu::LoadOp::Clear(wgpu::Color {
+                            r: SURFACE_R,
+                            g: SURFACE_G,
+                            b: SURFACE_B,
+                            a: 1.0,
+                        }),
                         store: wgpu::StoreOp::Store,
                     },
                 })],
