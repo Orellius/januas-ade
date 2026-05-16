@@ -13,7 +13,9 @@ workspace = true
 
 [dependencies]
 anyhow = "1.0.102"
+glyphon = "0.11.0"
 pollster = "0.4.0"
-wgpu = "26.0.1"
+tracing = "0.1.44"
+wgpu = "29"
 winit = "0.30.13"
 # Added via `cargo add` in S1.2 — versions resolved from current crates.io

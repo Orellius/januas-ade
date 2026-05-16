@@ -9,45 +9,81 @@
 //! Not responsibilities: window creation (lives in `app`), input handling
 //! (lives in `app`), terminal grid model (lives in `terminal` crate at S3).
 //! Test strategy: integration tests under `tests/` will assert headless wgpu
-//! init succeeds on the CI matrix; perf benchmarks land alongside S2.
+//! init succeeds on the CI matrix; perf benchmarks land alongside this slice.
 
 #![doc(html_no_source)]
 
 use std::sync::Arc;
+use std::time::Instant;
 
 use anyhow::{Context as _, Result};
+use glyphon::{
+    Attrs, Buffer, Cache, Color as GlyphColor, FontSystem, Metrics, Resolution, Shaping,
+    SwashCache, TextArea, TextAtlas, TextBounds, TextRenderer, Viewport,
+};
+use tracing::info;
 use winit::window::Window;
 
-/// GPU renderer owning the `wgpu` surface, device, queue, and configuration.
+/// Hardcoded smoke string for S2. Replaced when the terminal grid lands at S3.
+const SAMPLE_TEXT: &str = "Hello, Januas";
+const FONT_SIZE: f32 = 96.0;
+const LINE_HEIGHT: f32 = 110.0;
+/// Rolling-window length (in frames) before the FPS counter logs.
+const FPS_REPORT_INTERVAL_FRAMES: u32 = 600;
+
+/// GPU renderer owning the `wgpu` surface, device, queue, and text pipeline.
 ///
 /// Constructed by the application after `winit` creates a window. Holds an
 /// `Arc<Window>` so the surface's window outlives the renderer.
+#[allow(
+    clippy::struct_field_names,
+    reason = "text_renderer is the glyphon name and renaming would obscure the binding"
+)]
 pub struct Renderer {
     surface: wgpu::Surface<'static>,
     device: wgpu::Device,
     queue: wgpu::Queue,
     config: wgpu::SurfaceConfiguration,
+
+    font_system: FontSystem,
+    swash_cache: SwashCache,
+    viewport: Viewport,
+    atlas: TextAtlas,
+    text_renderer: TextRenderer,
+    buffer: Buffer,
+
+    /// `true` when the prepared text vertex buffer is stale and `text_renderer.prepare`
+    /// must be called before the next draw. Set on init and on resize.
+    text_dirty: bool,
+
+    frame_count: u32,
+    window_start: Instant,
+
     /// Held to keep the surface's window alive for the renderer's lifetime.
     _window: Arc<Window>,
 }
 
 impl Renderer {
-    /// Initialize the GPU surface, adapter, device, and queue for the given window.
+    /// Initialize the GPU surface, adapter, device, queue, and text pipeline.
     ///
     /// Blocks on the underlying async `wgpu` init via [`pollster`].
     ///
     /// # Errors
     ///
     /// Returns an error if the GPU instance cannot create a surface, no
-    /// adapter is available, or the device request fails.
+    /// adapter is available, the device request fails, or the text pipeline
+    /// fails to construct.
     pub fn new(window: Arc<Window>) -> Result<Self> {
         let size = window.inner_size();
         let width = size.width.max(1);
         let height = size.height.max(1);
 
-        let instance = wgpu::Instance::new(&wgpu::InstanceDescriptor {
+        let instance = wgpu::Instance::new(wgpu::InstanceDescriptor {
             backends: wgpu::Backends::PRIMARY,
-            ..Default::default()
+            flags: wgpu::InstanceFlags::default(),
+            memory_budget_thresholds: wgpu::MemoryBudgetThresholds::default(),
+            backend_options: wgpu::BackendOptions::default(),
+            display: None,
         });
 
         let surface = instance
@@ -66,6 +102,7 @@ impl Renderer {
             required_features: wgpu::Features::empty(),
             required_limits: wgpu::Limits::default(),
             memory_hints: wgpu::MemoryHints::default(),
+            experimental_features: wgpu::ExperimentalFeatures::default(),
             trace: wgpu::Trace::Off,
         }))
         .context("wgpu device request failed")?;
@@ -78,28 +115,71 @@ impl Renderer {
             .copied()
             .unwrap_or_else(|| caps.formats[0]);
 
+        // Pick uncapped present mode for the 1000 fps perf gate. Production-style
+        // vsync (FIFO) will return when an end-user-facing config layer arrives.
+        let present_mode = if caps.present_modes.contains(&wgpu::PresentMode::Mailbox) {
+            wgpu::PresentMode::Mailbox
+        } else if caps.present_modes.contains(&wgpu::PresentMode::Immediate) {
+            wgpu::PresentMode::Immediate
+        } else {
+            caps.present_modes[0]
+        };
+        info!(?present_mode, "surface present mode selected");
+
         let config = wgpu::SurfaceConfiguration {
             usage: wgpu::TextureUsages::RENDER_ATTACHMENT,
             format,
             width,
             height,
-            present_mode: caps.present_modes[0],
+            present_mode,
             alpha_mode: caps.alpha_modes[0],
             view_formats: vec![],
             desired_maximum_frame_latency: 2,
         };
         surface.configure(&device, &config);
 
+        let mut font_system = FontSystem::new();
+        let swash_cache = SwashCache::new();
+        let cache = Cache::new(&device);
+        let viewport = Viewport::new(&device, &cache);
+        let mut atlas = TextAtlas::new(&device, &queue, &cache, format);
+        let text_renderer =
+            TextRenderer::new(&mut atlas, &device, wgpu::MultisampleState::default(), None);
+
+        let mut buffer = Buffer::new(&mut font_system, Metrics::new(FONT_SIZE, LINE_HEIGHT));
+        #[allow(clippy::cast_precision_loss)]
+        let buf_w = width as f32;
+        #[allow(clippy::cast_precision_loss)]
+        let buf_h = height as f32;
+        buffer.set_size(&mut font_system, Some(buf_w), Some(buf_h));
+        buffer.set_text(
+            &mut font_system,
+            SAMPLE_TEXT,
+            &Attrs::new(),
+            Shaping::Advanced,
+            None,
+        );
+        buffer.shape_until_scroll(&mut font_system, false);
+
         Ok(Self {
             surface,
             device,
             queue,
             config,
+            font_system,
+            swash_cache,
+            viewport,
+            atlas,
+            text_renderer,
+            buffer,
+            text_dirty: true,
+            frame_count: 0,
+            window_start: Instant::now(),
             _window: window,
         })
     }
 
-    /// Resize the GPU surface to new window dimensions. Zero-sized inputs are ignored.
+    /// Resize the GPU surface and text buffer. Zero-sized inputs are ignored.
     pub fn resize(&mut self, width: u32, height: u32) {
         if width == 0 || height == 0 {
             return;
@@ -107,18 +187,66 @@ impl Renderer {
         self.config.width = width;
         self.config.height = height;
         self.surface.configure(&self.device, &self.config);
+        #[allow(clippy::cast_precision_loss)]
+        let w = width as f32;
+        #[allow(clippy::cast_precision_loss)]
+        let h = height as f32;
+        self.buffer
+            .set_size(&mut self.font_system, Some(w), Some(h));
+        self.text_dirty = true;
     }
 
-    /// Render one black clear-color frame.
+    /// Render one frame: clear to black, draw the sample string, present.
     ///
     /// # Errors
     ///
-    /// Returns an error if acquiring the next swapchain texture fails.
+    /// Returns an error if acquiring the next swapchain texture or preparing
+    /// the text pipeline fails.
     pub fn render(&mut self) -> Result<()> {
-        let frame = self
-            .surface
-            .get_current_texture()
-            .context("get_current_texture failed")?;
+        if self.text_dirty {
+            self.viewport.update(
+                &self.queue,
+                Resolution {
+                    width: self.config.width,
+                    height: self.config.height,
+                },
+            );
+
+            self.text_renderer
+                .prepare(
+                    &self.device,
+                    &self.queue,
+                    &mut self.font_system,
+                    &mut self.atlas,
+                    &self.viewport,
+                    [TextArea {
+                        buffer: &self.buffer,
+                        left: 32.0,
+                        top: 32.0,
+                        scale: 1.0,
+                        bounds: TextBounds {
+                            left: 0,
+                            top: 0,
+                            #[allow(clippy::cast_possible_wrap)]
+                            right: self.config.width as i32,
+                            #[allow(clippy::cast_possible_wrap)]
+                            bottom: self.config.height as i32,
+                        },
+                        default_color: GlyphColor::rgb(220, 220, 220),
+                        custom_glyphs: &[],
+                    }],
+                    &mut self.swash_cache,
+                )
+                .context("text prepare failed")?;
+
+            self.text_dirty = false;
+        }
+
+        let frame = match self.surface.get_current_texture() {
+            wgpu::CurrentSurfaceTexture::Success(t)
+            | wgpu::CurrentSurfaceTexture::Suboptimal(t) => t,
+            other => anyhow::bail!("get_current_texture: {other:?}"),
+        };
         let view = frame
             .texture
             .create_view(&wgpu::TextureViewDescriptor::default());
@@ -128,8 +256,8 @@ impl Renderer {
                 label: Some("januas-ade-frame"),
             });
         {
-            let _pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
-                label: Some("januas-ade-clear"),
+            let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+                label: Some("januas-ade-clear-and-text"),
                 color_attachments: &[Some(wgpu::RenderPassColorAttachment {
                     view: &view,
                     depth_slice: None,
@@ -140,12 +268,34 @@ impl Renderer {
                     },
                 })],
                 depth_stencil_attachment: None,
+                multiview_mask: None,
                 timestamp_writes: None,
                 occlusion_query_set: None,
             });
+            self.text_renderer
+                .render(&self.atlas, &self.viewport, &mut pass)
+                .context("text render failed")?;
         }
         self.queue.submit(std::iter::once(encoder.finish()));
         frame.present();
+
+        self.atlas.trim();
+
+        self.frame_count += 1;
+        if self.frame_count >= FPS_REPORT_INTERVAL_FRAMES {
+            let elapsed = self.window_start.elapsed();
+            #[allow(clippy::cast_precision_loss)]
+            let fps = f64::from(self.frame_count) / elapsed.as_secs_f64();
+            info!(
+                frames = self.frame_count,
+                secs = elapsed.as_secs_f64(),
+                fps = fps,
+                "fps sample"
+            );
+            self.frame_count = 0;
+            self.window_start = Instant::now();
+        }
+
         Ok(())
     }
 }
