@@ -153,9 +153,7 @@ fn flat(color: [u8; 3], alpha: f32) -> RectStyle {
 }
 
 fn rounded(color: [u8; 3], alpha: f32, radius: f32) -> RectStyle {
-    let mut s = RectStyle::fill(linear(color, alpha));
-    s.radius = radius;
-    s
+    RectStyle::fill(linear(color, alpha)).with_radius(radius)
 }
 
 fn outlined(
@@ -169,10 +167,11 @@ fn outlined(
         fill: linear(fill_rgb, fill_a),
         border: linear(border_rgb, border_a),
         border_width: 1.0,
-        radius,
+        radii: [radius; 4],
         shadow_color: [0.0; 4],
         shadow_offset: [0.0; 2],
         shadow_blur: 0.0,
+        gradient: None,
     }
 }
 

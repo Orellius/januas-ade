@@ -129,13 +129,14 @@ fn rect_past_viewport_right_edge_panics() {
         f.rects.push(januas_ui::Rect {
             pos: [180.0, 0.0],
             size: [30.0, 30.0], // right edge 210 > viewport 200
-            radius: 0.0,
+            radii: [0.0; 4],
             border_width: 0.0,
             fill: [0.0; 4],
             border: [0.0; 4],
             shadow_color: [0.0; 4],
             shadow_offset: [0.0; 2],
             shadow_blur: 0.0,
+            gradient_index: januas_ui::NO_GRADIENT,
         });
         f
     };
@@ -149,13 +150,14 @@ fn fractional_rect_pos_panics() {
     f.rects.push(januas_ui::Rect {
         pos: [10.5, 0.0],
         size: [20.0, 20.0],
-        radius: 0.0,
+        radii: [0.0; 4],
         border_width: 0.0,
         fill: [0.0; 4],
         border: [0.0; 4],
         shadow_color: [0.0; 4],
         shadow_offset: [0.0; 2],
         shadow_blur: 0.0,
+        gradient_index: januas_ui::NO_GRADIENT,
     });
     assert_pixel_grid_snap(&f);
 }

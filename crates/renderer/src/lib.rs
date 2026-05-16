@@ -18,7 +18,7 @@ mod rect;
 mod text;
 
 pub use image::{ImageId, ImageInstance, ImagePipeline};
-pub use rect::{Rect, RectPipeline};
+pub use rect::{GradientStop, NO_GRADIENT, RadialGradient, Rect, RectPipeline};
 pub use text::{TextFamily, TextRun};
 
 use std::sync::Arc;
@@ -325,6 +325,16 @@ impl Renderer {
     pub fn set_rects(&mut self, rects: &[Rect]) {
         self.rect_pipeline
             .set_rects(&self.device, &self.queue, rects);
+    }
+
+    /// Replace the radial-gradient table. `Rect.gradient_index` references
+    /// entries in `gradients` by position (or [`NO_GRADIENT`] to skip). Pass
+    /// `&[]` to clear; calling without re-uploading rects leaves any stale
+    /// indices pointing at the dummy zero slot — that just degrades to no
+    /// visible gradient, never a crash.
+    pub fn set_gradients(&mut self, gradients: &[RadialGradient]) {
+        self.rect_pipeline
+            .set_gradients(&self.device, &self.queue, gradients);
     }
 
     /// Replace the renderer's text content with a single span at the legacy

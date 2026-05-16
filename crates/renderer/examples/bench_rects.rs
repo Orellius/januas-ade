@@ -13,7 +13,7 @@
 use std::time::Instant;
 
 use anyhow::{Context as _, Result};
-use januas_renderer::{Rect, RectPipeline};
+use januas_renderer::{NO_GRADIENT, Rect, RectPipeline};
 use tracing::info;
 use tracing_subscriber::EnvFilter;
 
@@ -70,13 +70,14 @@ fn build_grid() -> Vec<Rect> {
             rects.push(Rect {
                 pos: [x, y],
                 size: [TILE_W, TILE_H],
-                radius: TILE_RADIUS,
+                radii: [TILE_RADIUS; 4],
                 border_width: TILE_BORDER,
                 fill,
                 border,
                 shadow_color: [0.0; 4],
                 shadow_offset: [0.0; 2],
                 shadow_blur: 0.0,
+                gradient_index: NO_GRADIENT,
             });
         }
     }

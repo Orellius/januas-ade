@@ -22,7 +22,9 @@
 //! non-overlap, padding inset, flex distribution, cross-axis alignment).
 //! Visual correctness is gated by the `home_compose` example at slice close.
 
-pub use januas_renderer::{ImageId, ImageInstance, Rect, TextFamily, TextRun};
+pub use januas_renderer::{
+    GradientStop, ImageId, ImageInstance, NO_GRADIENT, RadialGradient, Rect, TextFamily, TextRun,
+};
 
 pub mod color;
 pub mod debug;
@@ -100,6 +102,11 @@ impl EdgeInsets {
 ///
 /// Colors are linear-space RGBA in `[0.0, 1.0]` (mirrors
 /// [`januas_renderer::Rect`]). `border_width == 0.0` disables the border.
+///
+/// Stays `Copy` so callers can pass it through `const fn` constructors and
+/// the layout pass can read field-by-field without `.clone()`. The optional
+/// gradient adds bytes but stays well under the 256-byte threshold where
+/// stack copies start showing in profiles.
 #[derive(Copy, Clone, Debug, PartialEq)]
 pub struct RectStyle {
     /// Linear-space RGBA fill color.
@@ -108,29 +115,49 @@ pub struct RectStyle {
     pub border: [f32; 4],
     /// Inset border thickness in pixels; `0.0` for a borderless rect.
     pub border_width: f32,
-    /// Corner radius in pixels.
-    pub radius: f32,
+    /// Per-corner radii in pixels, ordered `[TL, TR, BR, BL]`.
+    pub radii: [f32; 4],
     /// Linear-space RGBA shadow color. Alpha `0.0` disables the shadow.
     pub shadow_color: [f32; 4],
     /// Shadow offset in pixels; positive y casts the shadow downward.
     pub shadow_offset: [f32; 2],
     /// Gaussian blur sigma in pixels.
     pub shadow_blur: f32,
+    /// Optional radial gradient painted over `fill`, under `border`. The
+    /// layout pass registers the gradient into [`LayoutFrame::gradients`]
+    /// and wires its index onto the emitted [`Rect`].
+    pub gradient: Option<RadialGradient>,
 }
 
 impl RectStyle {
-    /// Flat fill, no border, no rounding, no shadow.
+    /// Flat fill, no border, no rounding, no shadow, no gradient.
     #[must_use]
     pub const fn fill(color: [f32; 4]) -> Self {
         Self {
             fill: color,
             border: [0.0; 4],
             border_width: 0.0,
-            radius: 0.0,
+            radii: [0.0; 4],
             shadow_color: [0.0; 4],
             shadow_offset: [0.0; 2],
             shadow_blur: 0.0,
+            gradient: None,
         }
+    }
+
+    /// Builder: set every corner to the same radius. Most surfaces want this;
+    /// asymmetric corners go through [`Self::with_radii`].
+    #[must_use]
+    pub const fn with_radius(mut self, radius: f32) -> Self {
+        self.radii = [radius; 4];
+        self
+    }
+
+    /// Builder: set per-corner radii, ordered `[TL, TR, BR, BL]`.
+    #[must_use]
+    pub const fn with_radii(mut self, radii: [f32; 4]) -> Self {
+        self.radii = radii;
+        self
     }
 
     /// Builder: attach a soft drop shadow.
@@ -139,6 +166,14 @@ impl RectStyle {
         self.shadow_color = color;
         self.shadow_offset = offset;
         self.shadow_blur = blur;
+        self
+    }
+
+    /// Builder: attach a radial gradient that paints over the flat fill
+    /// (source-over) and under the border.
+    #[must_use]
+    pub const fn with_gradient(mut self, gradient: RadialGradient) -> Self {
+        self.gradient = Some(gradient);
         self
     }
 }
@@ -395,10 +430,12 @@ impl Stack {
 
 /// Output of a [`layout`] pass.
 ///
-/// A flat list of absolutely-positioned rects, text runs, and image
-/// instances, ready to feed [`januas_renderer::Renderer::set_rects`],
-/// [`januas_renderer::Renderer::set_text_runs`], and
-/// [`januas_renderer::Renderer::set_images`].
+/// A flat list of absolutely-positioned rects, text runs, image instances,
+/// and any radial-gradient definitions referenced by the rects, ready to feed
+/// [`januas_renderer::Renderer::set_rects`],
+/// [`januas_renderer::Renderer::set_text_runs`],
+/// [`januas_renderer::Renderer::set_images`], and
+/// [`januas_renderer::Renderer::set_gradients`].
 #[derive(Clone, Debug, Default)]
 pub struct LayoutFrame {
     /// Absolutely-positioned rects in declaration order.
@@ -407,6 +444,10 @@ pub struct LayoutFrame {
     pub texts: Vec<TextRun>,
     /// Absolutely-positioned image instances in declaration order.
     pub images: Vec<ImageInstance>,
+    /// Radial-gradient definitions referenced by `rects[i].gradient_index`.
+    /// `place_*` appends each `RectStyle.gradient` here and stamps the
+    /// returned position onto the emitted [`Rect`].
+    pub gradients: Vec<RadialGradient>,
     /// Hit-test zones in declaration order — later entries paint on top of
     /// earlier ones, so reverse-iterate to find the topmost hit.
     pub hit_zones: Vec<HitZone>,
@@ -422,13 +463,19 @@ impl LayoutFrame {
     /// Multiply every position, size, font metric, image bound, and hit-zone
     /// bound by `scale`. Used to convert a logical-pixel layout into the
     /// physical pixels the renderer surface uses on a `HiDPI` display.
+    ///
+    /// Gradients live in normalized 0..1 rect-local coordinates, so they need
+    /// no scaling — the shader rescales them against each rect's physical
+    /// half-extent at draw time.
     pub fn scale_by(&mut self, scale: f32) {
         for r in &mut self.rects {
             r.pos[0] *= scale;
             r.pos[1] *= scale;
             r.size[0] *= scale;
             r.size[1] *= scale;
-            r.radius *= scale;
+            for r4 in &mut r.radii {
+                *r4 *= scale;
+            }
             r.border_width *= scale;
             r.shadow_offset[0] *= scale;
             r.shadow_offset[1] *= scale;
@@ -500,18 +547,36 @@ pub fn estimate_text_size(content: &str, font_size: f32, line_height: f32) -> [f
     [w, h]
 }
 
+/// Push `gradient` (if any) onto `gradients` and return its index, or
+/// [`NO_GRADIENT`] when the rect has no gradient. The cast is safe by design:
+/// gradient counts fit comfortably below `i32::MAX`.
+fn push_gradient(gradients: &mut Vec<RadialGradient>, gradient: Option<RadialGradient>) -> i32 {
+    gradient.map_or(NO_GRADIENT, |g| {
+        #[allow(
+            clippy::cast_possible_truncation,
+            clippy::cast_possible_wrap,
+            reason = "gradient counts fit in i32 by many orders of magnitude"
+        )]
+        let idx = gradients.len() as i32;
+        gradients.push(g);
+        idx
+    })
+}
+
 fn place_stack(frame: &mut LayoutFrame, stack: &Stack, origin: [f32; 2], size: [f32; 2]) {
     if let Some(style) = stack.background {
+        let gradient_index = push_gradient(&mut frame.gradients, style.gradient);
         frame.rects.push(Rect {
             pos: origin,
             size,
-            radius: style.radius,
+            radii: style.radii,
             border_width: style.border_width,
             fill: style.fill,
             border: style.border,
             shadow_color: style.shadow_color,
             shadow_offset: style.shadow_offset,
             shadow_blur: style.shadow_blur,
+            gradient_index,
         });
     }
 
@@ -594,16 +659,18 @@ fn place_node(frame: &mut LayoutFrame, node: &Node, pos: [f32; 2], size: [f32; 2
     }
     match &node.kind {
         NodeKind::Rect(style) => {
+            let gradient_index = push_gradient(&mut frame.gradients, style.gradient);
             frame.rects.push(Rect {
                 pos,
                 size,
-                radius: style.radius,
+                radii: style.radii,
                 border_width: style.border_width,
                 fill: style.fill,
                 border: style.border,
                 shadow_color: style.shadow_color,
                 shadow_offset: style.shadow_offset,
                 shadow_blur: style.shadow_blur,
+                gradient_index,
             });
         }
         NodeKind::Text(style, content) => {
