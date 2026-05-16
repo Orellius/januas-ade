@@ -847,6 +847,10 @@ dependencies = [
 ]
 
 [[package]]
+name = "januas-modules"
+version = "0.0.0"
+
+[[package]]
 name = "januas-pty"
 version = "0.0.0"
 dependencies = [
@@ -883,6 +887,7 @@ name = "januas-ui"
 version = "0.0.0"
 dependencies = [
  "anyhow",
+ "januas-modules",
  "januas-renderer",
  "pollster",
  "tracing",

@@ -382,10 +382,12 @@ impl Stack {
         self
     }
 
-    /// Builder: replace the child list.
+    /// Builder: replace the child list. Accepts any iterator-shaped input
+    /// (arrays, `Vec`s, `Iterator` chains) so callers can compose without
+    /// the `.collect::<Vec<_>>()` tax.
     #[must_use]
-    pub fn with_children(mut self, children: Vec<Node>) -> Self {
-        self.children = children;
+    pub fn with_children<I: IntoIterator<Item = Node>>(mut self, children: I) -> Self {
+        self.children = children.into_iter().collect();
         self
     }
 }

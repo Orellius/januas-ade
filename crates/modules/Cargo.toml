@@ -1,0 +1,16 @@
+[package]
+name = "januas-modules"
+version = "0.0.0"
+description = "Januas ADE — module registry + instance set (S5.5e)"
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+
+[lints]
+workspace = true
+
+[dependencies]
+
+[dev-dependencies]

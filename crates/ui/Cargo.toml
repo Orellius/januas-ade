@@ -16,6 +16,7 @@ januas-renderer = { version = "0.0.0", path = "../renderer" }
 
 [dev-dependencies]
 anyhow = "1.0.102"
+januas-modules = { version = "0.0.0", path = "../modules" }
 pollster = "0.4.0"
 tracing = "0.1.44"
 tracing-subscriber = { version = "0.3.23", features = ["env-filter"] }

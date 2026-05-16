@@ -1,21 +1,17 @@
-//! S5.5d — Januas ADE home screen, composed against
-//! `~/Desktop/claude-html/januas-home-20260516-0947.html` v6.
+//! S5.5e — Januas ADE home screen, wired to a real module-instance set.
 //!
-//! Four sections stacked top-to-bottom: titlebar (traffic dots + mono title),
-//! subway (workspace tabs + add), hero (centered logo / wordmark / meta-row
-//! / tagline / Parallex mode-button), footer (mono hotkey chips). Real
-//! cosmic-text measurement via `Renderer::measure_text` replaces the
-//! monospace approximation; family selection (`Display` / `Body` / `Mono`)
-//! lands the locked v0.1 type stack from
-//! `~/Desktop/Januas/docs/design-tokens.md`. The brand mark PNG is uploaded
-//! to the new image-texture pipeline and clipped to the 14px radius the
-//! token spec calls out for the logo bitmap.
+//! Replaces S5.5d's mockup data with a `januas_modules::InstanceSet`. Home
+//! is a dedicated button (left of a 1px divider) — not a tab; tabs are
+//! running `ModuleInstance`s, dynamically spawned by clicking a launcher
+//! button on the Home scene. Selecting a tab swaps the scene to that
+//! module's stub view; selecting Home returns to the launcher.
 //!
 //! Run: `cargo run --release --example home_compose -p januas-ui`.
 
 use std::sync::Arc;
 
 use anyhow::{Context as _, Result};
+use januas_modules::{InstanceId, InstanceSet, ModuleInstance, ModuleKind, Selection};
 use januas_renderer::{ImageId, Renderer, TextFamily};
 use januas_ui::{
     CrossAlign, EdgeInsets, HitZone, ImageStyle, Node, NodeId, NodeKind, PointerState, RectStyle,
@@ -38,64 +34,79 @@ use winit::{
 const DEFAULT_LOGICAL_W: f64 = 1280.0;
 const DEFAULT_LOGICAL_H: f64 = 800.0;
 
-// Section heights match the v6 CSS literals; only the hero is flex.
 const TITLEBAR_H: f32 = 34.0;
 const SUBWAY_H: f32 = 44.0;
 const FOOTER_H: f32 = 40.0;
 
-// Hover/active state IDs. `0` reserved as "unselected" — Personal lands as
-// the default selection on boot.
-const TAB_PERSONAL: NodeId = 1;
-const TAB_DEV: NodeId = 2;
-const TAB_OSS: NodeId = 3;
-const TAB_FIVEM: NodeId = 4;
-const TAB_SCRATCH: NodeId = 5;
-const TAB_ADD: NodeId = 6;
-const MODE_BTN: NodeId = 7;
+// NodeId allocation. Static IDs first; ranges for dynamic groups follow.
+const HOME_BTN: NodeId = 1;
+const TAB_ADD: NodeId = 2;
+const LAUNCHER_BASE: NodeId = 100; // launcher_node_id(kind_index) = 100 + index
+const TAB_BASE: NodeId = 1_000; // tab_node_id(instance) = 1000 + instance.id
+const TAB_CLOSE_BASE: NodeId = 2_000; // tab_close_node_id(instance) = 2000 + instance.id
 
-/// Logical workspace presented in the subway. One per tab.
-struct Workspace {
-    id: NodeId,
-    name: &'static str,
-    dot: [u8; 3],
-    count: &'static str,
-}
+const MACOS_TRAFFIC_RESERVE: f32 = 78.0;
 
-const WORKSPACES: &[Workspace] = &[
-    Workspace {
-        id: TAB_PERSONAL,
-        name: "Personal",
-        dot: palette::ACCENT,
-        count: "12",
-    },
-    Workspace {
-        id: TAB_DEV,
-        name: "Januas Dev",
-        dot: palette::GREEN,
-        count: "6",
-    },
-    Workspace {
-        id: TAB_OSS,
-        name: "OSS",
-        dot: palette::BLUE,
-        count: "3",
-    },
-    Workspace {
-        id: TAB_FIVEM,
-        name: "FiveM (orellius)",
-        dot: palette::ORANGE,
-        count: "2",
-    },
-    Workspace {
-        id: TAB_SCRATCH,
-        name: "Scratch",
-        dot: palette::PINK,
-        count: "0",
-    },
-];
+/// Breathing room on each side of the subway's vertical divider — reads
+/// as "deliberate divider," not a stuck-on edge against the Home button.
+const SUBWAY_DIVIDER_GAP: f32 = 8.0;
 
-/// One row in the footer hotkey strip. `kbd` is the chord glyphs, `label`
-/// the action verb beside them.
+// Hero scene layout constants. Mirror the v6 mockup's CSS values; pulled
+// up here so the launcher row, tagline, and spacers stop repeating literals.
+const HERO_PAD_V: f32 = 56.0;
+const HERO_PAD_H: f32 = 40.0;
+const HERO_ITEM_GAP: f32 = 28.0;
+const LAUNCHER_ITEM_GAP: f32 = 12.0;
+const LAUNCHER_PAD_V: f32 = 14.0;
+const LAUNCHER_PAD_H: f32 = 16.0;
+const LAUNCHER_BODY_GAP: f32 = 14.0;
+const LAUNCHER_MIN_W: f32 = 360.0;
+const LAUNCHER_ICON_BOX: f32 = 28.0;
+const TAGLINE_MAX_W: f32 = 420.0;
+const TAGLINE_LINE_MULT: f32 = 1.5;
+const STUB_ITEM_GAP: f32 = 14.0;
+const LOGO_HERO_SIZE: f32 = 64.0;
+const FOOTER_CHIP_GAP: f32 = 7.0;
+const FOOTER_ROW_GAP: f32 = 22.0;
+
+// Subway tab geometry. Constants drive both the layout AND the intrinsic
+// width calculation, so a literal change in one place can't drift from the
+// recompute.
+const TAB_PAD_L: f32 = 10.0;
+const TAB_PAD_R: f32 = 12.0;
+const TAB_GAP: f32 = 9.0;
+const TAB_RAIL_W: f32 = 2.0;
+const TAB_RAIL_H: f32 = 16.0;
+const TAB_DOT_DIAMETER: f32 = 7.0;
+const TAB_CLOSE_BOX: f32 = 14.0;
+const TAB_OUTER_H: f32 = 28.0;
+/// Fixed chrome contribution to a tab's width: padding + rail + dot + close
+/// box + the four inter-child gaps. The dynamic part is `name_w + kind_w`.
+const TAB_CHROME_W: f32 =
+    TAB_PAD_L + TAB_RAIL_W + TAB_DOT_DIAMETER + TAB_CLOSE_BOX + 4.0 * TAB_GAP + TAB_PAD_R;
+
+/// Floor on the flexible trailing spacer inside a launcher button — keeps
+/// the kbd-chip-shaped reserve from collapsing flush against the body when
+/// `LAUNCHER_MIN_W` doesn't already absorb the slack.
+const LAUNCHER_TRAILING_MIN: f32 = 100.0;
+
+/// Pre-folded chrome width for a launcher button (everything except the body).
+const LAUNCHER_CHROME_W: f32 =
+    2.0 * LAUNCHER_PAD_H + LAUNCHER_ICON_BOX + 2.0 * LAUNCHER_BODY_GAP + LAUNCHER_TRAILING_MIN;
+/// Pre-folded outer height for a launcher button.
+const LAUNCHER_OUTER_H: f32 = 2.0 * LAUNCHER_PAD_V + LAUNCHER_ICON_BOX;
+/// Hero column's fixed contribution to content height: logo + 4 inter-item gaps.
+const HERO_FIXED_H: f32 = LOGO_HERO_SIZE + 4.0 * HERO_ITEM_GAP;
+/// Stub scene's fixed contribution to content height: 2 inter-item gaps.
+const STUB_GAPS_H: f32 = 2.0 * STUB_ITEM_GAP;
+
+const LOGO_PNG: &[u8] = include_bytes!("../../../assets/januas-ade-logo.png");
+
+const TAGLINE: &str = "Pick a module to spin up a workspace, or open one from the tab strip above.";
+const WORDMARK: &str = "Januas";
+const META_TEMPLATE: &str = "v0.0.0  ·  slice s5.5e  ·  ~340 fps";
+
+/// One footer hotkey chip. `kbd` is the chord glyphs, `label` the action.
 struct Hotkey {
     kbd: &'static str,
     label: &'static str,
@@ -107,8 +118,12 @@ const HOTKEYS: &[Hotkey] = &[
         label: "new terminal",
     },
     Hotkey {
-        kbd: "⌘ D",
-        label: "split right",
+        kbd: "⌘ T",
+        label: "new tab",
+    },
+    Hotkey {
+        kbd: "⌘ W",
+        label: "close tab",
     },
     Hotkey {
         kbd: "⌘ K",
@@ -118,27 +133,9 @@ const HOTKEYS: &[Hotkey] = &[
         kbd: "⌘ ,",
         label: "settings",
     },
-    Hotkey {
-        kbd: "⌘ /",
-        label: "search",
-    },
 ];
 
-/// Static text strings the scene reads from before it can ask the renderer
-/// for measurements. Kept here so the build pass measures once per string.
-const META_ROW: &str = "v0.0.0  ·  slice s5.5d  ·  ~340 fps";
-const TAGLINE: &str =
-    "A workspace is a project, a layout, and the CLIs that go with them — wired in one pass.";
-const WORDMARK: &str = "Januas";
-const TITLE_TEXT: &str = "januas · personal";
-const MODE_NAME: &str = "Parallex";
-const MODE_SUB: &str = "project · grid · providers";
-const MODE_KBD: &str = "⌘ T";
-const MODE_ICON: &str = "▦";
-
-const fn rect(size: [f32; 2], style: RectStyle) -> Node {
-    Node::rect(size, style)
-}
+// ===== Helpers =====
 
 fn flat(color: [u8; 3], alpha: f32) -> RectStyle {
     RectStyle::fill(linear(color, alpha))
@@ -168,8 +165,10 @@ fn outlined(
     }
 }
 
-fn circle(diameter: f32, color: [u8; 3]) -> Node {
-    rect([diameter, diameter], rounded(color, 1.0, diameter * 0.5))
+/// Pair an sRGB triple with an alpha byte. Cheap helper that avoids the
+/// hand-rolled `[c[0], c[1], c[2], alpha]` indexing tax at every call site.
+const fn with_alpha(rgb: [u8; 3], alpha: u8) -> [u8; 4] {
+    [rgb[0], rgb[1], rgb[2], alpha]
 }
 
 fn text_node(
@@ -187,81 +186,119 @@ fn text_node(
         TextStyle {
             font_size,
             line_height,
-            color: [color[0], color[1], color[2], alpha],
+            color: with_alpha(color, alpha),
             family,
         },
         size,
     )
 }
 
-const fn spacer(flex_weight: f32) -> Node {
+const fn spacer(weight: f32) -> Node {
     Node {
         size: [0.0; 2],
-        flex: Some(flex_weight),
+        flex: Some(weight),
         kind: NodeKind::Rect(RectStyle::fill([0.0; 4])),
         id: None,
     }
 }
 
 fn divider(viewport_w: f32) -> Node {
-    rect([viewport_w, 1.0], flat(palette::CREAM, tokens::CREAM_09_A))
+    Node::rect([viewport_w, 1.0], flat(palette::CREAM, tokens::CREAM_09_A))
+}
+
+const fn tab_node_id(id: InstanceId) -> NodeId {
+    TAB_BASE + id.as_u32()
+}
+
+const fn tab_close_node_id(id: InstanceId) -> NodeId {
+    TAB_CLOSE_BASE + id.as_u32()
+}
+
+const fn try_tab_id(node_id: NodeId) -> Option<InstanceId> {
+    if node_id >= TAB_BASE && node_id < TAB_CLOSE_BASE {
+        Some(InstanceId(node_id - TAB_BASE))
+    } else {
+        None
+    }
+}
+
+const fn try_tab_close_id(node_id: NodeId) -> Option<InstanceId> {
+    if node_id >= TAB_CLOSE_BASE {
+        Some(InstanceId(node_id - TAB_CLOSE_BASE))
+    } else {
+        None
+    }
+}
+
+const fn launcher_node_id(kind_index: usize) -> NodeId {
+    #[allow(
+        clippy::cast_possible_truncation,
+        reason = "kind_index < ALL.len() ≪ u32::MAX"
+    )]
+    let idx = kind_index as u32;
+    LAUNCHER_BASE + idx
+}
+
+fn try_launcher_kind(node_id: NodeId) -> Option<ModuleKind> {
+    if (LAUNCHER_BASE..TAB_BASE).contains(&node_id) {
+        let idx = (node_id - LAUNCHER_BASE) as usize;
+        ModuleKind::ALL.get(idx).copied()
+    } else {
+        None
+    }
+}
+
+fn title_for(selection: Selection, set: &InstanceSet) -> String {
+    match selection {
+        Selection::Home => "januas · home".to_string(),
+        Selection::Tab(id) => set.get(id).map_or_else(
+            || "januas".to_string(),
+            |inst| format!("januas · {}", inst.name.to_lowercase()),
+        ),
+    }
 }
 
 // ===== Titlebar =====
-//
-// On macOS, winit's WindowAttributesExtMacOS hides the OS titlebar chrome
-// and extends the content view under the standard window-control cluster
-// (red/amber/green close/min/max dots). Those dots paint ON TOP of our
-// titlebar at fixed positions starting ~11px from the left edge; the
-// cluster spans roughly 63px. We leave 78px of empty reserve on the left
-// (and a matching reserve on the right) so the center title sits visually
-// centered against the OS-drawn dots without us re-painting them.
 
-/// Width of the macOS native traffic-light cluster plus a little breathing
-/// room. Token-shaped so the next titlebar surface can reuse it.
-const MACOS_TRAFFIC_RESERVE: f32 = 78.0;
-
-fn titlebar_center(renderer: &mut Renderer, logo: ImageId) -> Node {
+fn titlebar(renderer: &mut Renderer, logo: ImageId, title: &str) -> Node {
     let logo_node = Node::image([14.0, 14.0], ImageStyle::new(logo).with_radius(3.0));
-    let title = text_node(
+    let title_node = text_node(
         renderer,
-        TITLE_TEXT,
+        title,
         TextFamily::Mono,
         fonts::SMALL_PX,
         tokens::TEXT_DIM,
         0xff,
     );
-    let title_w = title.size[0];
+    let title_w = title_node.size[0];
 
-    let inner = Stack::row()
-        .with_gap(8.0)
-        .with_cross_align(CrossAlign::Center)
-        .with_children(vec![logo_node, title]);
-    Node::stack([14.0 + 8.0 + title_w, 14.0], inner)
-}
+    let center = Node::stack(
+        [14.0 + 8.0 + title_w, 14.0],
+        Stack::row()
+            .with_gap(8.0)
+            .with_cross_align(CrossAlign::Center)
+            .with_children([logo_node, title_node]),
+    );
 
-fn titlebar(renderer: &mut Renderer, logo: ImageId) -> Node {
-    let center = titlebar_center(renderer, logo);
-
+    // Reserve at both ends for the macOS native traffic-light cluster
+    // (overlays our content) so the title stays visually centered.
+    let traffic_reserve = || Node::rect([MACOS_TRAFFIC_RESERVE, 1.0], RectStyle::fill([0.0; 4]));
     let row = Stack::row()
         .with_padding(EdgeInsets::symmetric(0.0, 12.0))
         .with_cross_align(CrossAlign::Center)
-        .with_children(vec![
-            // Left reserve — native macOS traffic-light buttons paint here.
-            Node::rect([MACOS_TRAFFIC_RESERVE, 1.0], RectStyle::fill([0.0; 4])),
+        .with_children([
+            traffic_reserve(),
             spacer(1.0),
             center,
             spacer(1.0),
-            // Symmetric right reserve so the title sits visually centered
-            // against the native cluster on the left.
-            Node::rect([MACOS_TRAFFIC_RESERVE, 1.0], RectStyle::fill([0.0; 4])),
+            traffic_reserve(),
         ]);
     Node::stack([0.0, TITLEBAR_H], row)
 }
 
-// ===== Subway =====
+// ===== Subway: Home button + divider + dynamic tabs + add =====
 
-fn ws_tab(renderer: &mut Renderer, ws: &Workspace, hovered: bool, active: bool) -> Node {
+fn home_button(renderer: &mut Renderer, logo: ImageId, hovered: bool, active: bool) -> Node {
     let bg = if active {
         rounded(tokens::SURFACE_PANEL, 1.0, radii::MD)
     } else if hovered {
@@ -270,49 +307,23 @@ fn ws_tab(renderer: &mut Renderer, ws: &Workspace, hovered: bool, active: bool) 
         rounded(tokens::SURFACE_BASE, 0.0, radii::MD)
     };
 
-    let name_color = if active {
-        tokens::TEXT
-    } else {
-        tokens::TEXT_DIM
-    };
-    let count_color = if active {
-        tokens::TEXT_DIM
-    } else {
-        tokens::TEXT_FAINT
-    };
-
-    let name = text_node(
+    let logo_node = Node::image([16.0, 16.0], ImageStyle::new(logo).with_radius(4.0));
+    let label = text_node(
         renderer,
-        ws.name,
+        "Home",
         TextFamily::Body,
         fonts::BODY_PX,
-        name_color,
+        if active {
+            tokens::TEXT
+        } else {
+            tokens::TEXT_DIM
+        },
         0xff,
     );
-    let count = text_node(
-        renderer,
-        ws.count,
-        TextFamily::Mono,
-        fonts::FOOTER_PX,
-        count_color,
-        0xff,
-    );
-    let name_w = name.size[0];
-    let count_w = count.size[0];
+    let label_w = label.size[0];
 
-    // Active rail: 2px × 16px accent strip at the tab's left edge. Sized
-    // intrinsically so CrossAlign::Center keeps it visually centered
-    // vertically within the 28px-tall tab body.
-    let rail: Node = if active {
-        rect([2.0, 16.0], rounded(tokens::ACCENT, 1.0, 1.0))
-    } else {
-        rect([2.0, 16.0], flat([0; 3], 0.0))
-    };
-
-    let dot = circle(7.0, ws.dot);
-
-    let content = Stack::row()
-        .with_gap(9.0)
+    let inner = Stack::row()
+        .with_gap(8.0)
         .with_padding(EdgeInsets {
             top: 0.0,
             right: 12.0,
@@ -321,34 +332,161 @@ fn ws_tab(renderer: &mut Renderer, ws: &Workspace, hovered: bool, active: bool) 
         })
         .with_cross_align(CrossAlign::Center)
         .with_background(bg)
-        .with_children(vec![rail, dot, name, count]);
-
-    let intrinsic_w = 2.0 + 9.0 + 7.0 + 9.0 + name_w + 9.0 + count_w + 10.0 + 12.0;
-    Node::stack([intrinsic_w, 28.0], content).with_id(ws.id)
+        .with_children([logo_node, label]);
+    Node::stack([10.0 + 16.0 + 8.0 + label_w + 12.0, 28.0], inner).with_id(HOME_BTN)
 }
 
-fn ws_add(hovered: bool) -> Node {
+fn tab_node(
+    renderer: &mut Renderer,
+    inst: &ModuleInstance,
+    hovered: bool,
+    active: bool,
+    close_hovered: bool,
+) -> Node {
+    let bg = if active {
+        rounded(tokens::SURFACE_PANEL, 1.0, radii::MD)
+    } else if hovered {
+        rounded(tokens::SURFACE_RAISED, 1.0, radii::MD)
+    } else {
+        rounded(tokens::SURFACE_BASE, 0.0, radii::MD)
+    };
+    let name_color = if active {
+        tokens::TEXT
+    } else {
+        tokens::TEXT_DIM
+    };
+    let kind_label = inst.kind.name();
+    let kind_text = text_node(
+        renderer,
+        kind_label,
+        TextFamily::Mono,
+        fonts::FOOTER_PX,
+        tokens::TEXT_FAINT,
+        0xff,
+    );
+    let name = text_node(
+        renderer,
+        &inst.name,
+        TextFamily::Body,
+        fonts::BODY_PX,
+        name_color,
+        0xff,
+    );
+    let kind_w = kind_text.size[0];
+    let name_w = name.size[0];
+
+    let rail_style = if active {
+        rounded(tokens::ACCENT, 1.0, 1.0)
+    } else {
+        flat([0; 3], 0.0)
+    };
+    let rail = Node::rect([TAB_RAIL_W, TAB_RAIL_H], rail_style);
+    let dot = Node::rect(
+        [TAB_DOT_DIAMETER, TAB_DOT_DIAMETER],
+        rounded(inst.color, 1.0, TAB_DOT_DIAMETER * 0.5),
+    );
+    let close = close_button(renderer, inst.id, close_hovered);
+
+    let content = Stack::row()
+        .with_gap(TAB_GAP)
+        .with_padding(EdgeInsets {
+            top: 0.0,
+            right: TAB_PAD_R,
+            bottom: 0.0,
+            left: TAB_PAD_L,
+        })
+        .with_cross_align(CrossAlign::Center)
+        .with_background(bg)
+        .with_children([rail, dot, name, kind_text, close]);
+
+    let intrinsic_w = TAB_CHROME_W + name_w + kind_w;
+    Node::stack([intrinsic_w, TAB_OUTER_H], content).with_id(tab_node_id(inst.id))
+}
+
+/// Compact `×` glyph that closes its parent tab. Painted after the tab body
+/// so its hit-zone wins under the reverse-painter hit-test, even though it
+/// sits inside the tab's outer hit region.
+fn close_button(renderer: &mut Renderer, instance: InstanceId, hovered: bool) -> Node {
+    let color = if hovered {
+        tokens::TEXT
+    } else {
+        tokens::TEXT_FAINT
+    };
+    let glyph = text_node(renderer, "×", TextFamily::Mono, 13.0, color, 0xff);
+    let [gw, gh] = glyph.size;
+    Node::stack(
+        [TAB_CLOSE_BOX, TAB_CLOSE_BOX],
+        Stack::row()
+            .with_cross_align(CrossAlign::Center)
+            .with_children([
+                spacer(1.0),
+                Node::stack(
+                    [gw, gh],
+                    Stack::column()
+                        .with_cross_align(CrossAlign::Center)
+                        .with_children([spacer(1.0), glyph, spacer(1.0)]),
+                ),
+                spacer(1.0),
+            ]),
+    )
+    .with_id(tab_close_node_id(instance))
+}
+
+fn add_tab_button(renderer: &mut Renderer, hovered: bool) -> Node {
     let bg = if hovered {
         rounded(tokens::SURFACE_RAISED, 1.0, radii::MD)
     } else {
         rounded(tokens::SURFACE_BASE, 0.0, radii::MD)
     };
+    let glyph_color = if hovered {
+        tokens::TEXT_DIM
+    } else {
+        tokens::TEXT_FAINT
+    };
+    let glyph = text_node(renderer, "+", TextFamily::Mono, 15.0, glyph_color, 0xff);
+    let [gw, gh] = glyph.size;
+    let centered = Node::stack(
+        [gw, gh],
+        Stack::column()
+            .with_cross_align(CrossAlign::Center)
+            .with_children([spacer(1.0), glyph, spacer(1.0)]),
+    );
     let inner = Stack::row()
         .with_cross_align(CrossAlign::Center)
         .with_background(bg)
-        .with_children(vec![spacer(1.0)]);
+        .with_children([spacer(1.0), centered, spacer(1.0)]);
     Node::stack([28.0, 28.0], inner).with_id(TAB_ADD)
 }
 
-fn subway(renderer: &mut Renderer, pointer: &PointerState, selected: NodeId) -> Node {
-    let mut children: Vec<Node> = Vec::with_capacity(WORKSPACES.len() + 2);
-    for ws in WORKSPACES {
-        let hovered = pointer.hovered == Some(ws.id);
-        let active = selected == ws.id;
-        children.push(ws_tab(renderer, ws, hovered, active));
-    }
-    children.push(spacer(1.0));
-    children.push(ws_add(pointer.hovered == Some(TAB_ADD)));
+fn subway(
+    renderer: &mut Renderer,
+    logo: ImageId,
+    set: &InstanceSet,
+    pointer: &PointerState,
+) -> Node {
+    let selection = set.selected();
+    let home_active = selection == Selection::Home;
+    let home_hovered = pointer.hovered == Some(HOME_BTN);
+    let gap = || Node::rect([SUBWAY_DIVIDER_GAP, 1.0], RectStyle::fill([0.0; 4]));
+    let v_divider = Node::rect([1.0, 20.0], flat(palette::CREAM, tokens::CREAM_05_A));
+
+    // Materialize each section before chaining — `renderer` is `&mut` and
+    // can only be in one closure at a time.
+    let home = home_button(renderer, logo, home_hovered, home_active);
+    let tabs: Vec<Node> = set
+        .ordered()
+        .map(|inst| {
+            let active = matches!(selection, Selection::Tab(id) if id == inst.id);
+            let hovered = pointer.hovered == Some(tab_node_id(inst.id));
+            let close_hovered = pointer.hovered == Some(tab_close_node_id(inst.id));
+            tab_node(renderer, inst, hovered, active, close_hovered)
+        })
+        .collect();
+    let add = add_tab_button(renderer, pointer.hovered == Some(TAB_ADD));
+
+    let head = [home, gap(), v_divider, gap()];
+    let tail = [add, spacer(1.0)];
+    let children = head.into_iter().chain(tabs).chain(tail);
 
     let row = Stack::row()
         .with_gap(2.0)
@@ -358,86 +496,14 @@ fn subway(renderer: &mut Renderer, pointer: &PointerState, selected: NodeId) -> 
     Node::stack([0.0, SUBWAY_H], row)
 }
 
-// ===== Hero =====
+// ===== Hero scenes =====
 
-fn hero(renderer: &mut Renderer, logo: ImageId, pointer: &PointerState) -> Node {
-    let logo_node = Node::image([64.0, 64.0], ImageStyle::new(logo).with_radius(radii::LOGO));
-
-    let wordmark = text_node(
-        renderer,
-        WORDMARK,
-        TextFamily::Display,
-        fonts::WORDMARK_PX,
-        tokens::TEXT,
-        0xff,
-    );
-    let wordmark_h = wordmark.size[1];
-
-    let meta = text_node(
-        renderer,
-        META_ROW,
-        TextFamily::Mono,
-        fonts::FOOTER_PX,
-        tokens::TEXT_FAINT,
-        0xff,
-    );
-    let meta_h = meta.size[1];
-
-    let tagline_line = fonts::TAGLINE_PX * 1.5;
-    let tagline_natural =
-        renderer.measure_text(TextFamily::Body, TAGLINE, fonts::TAGLINE_PX, tagline_line);
-    let tagline_max = 360.0;
-    let tagline_w = tagline_natural[0].min(tagline_max);
-    // The tagline wraps in HTML at 360px; with measure_text reporting the
-    // single-line width we cap the layout box and let the shaper wrap inside
-    // it. Two lines is the conservative bound for the v6 copy at 15px.
-    let tagline_h = if tagline_natural[0] > tagline_max {
-        tagline_line * 2.0
-    } else {
-        tagline_line
-    };
-    let tagline = Node::text_sized(
-        TAGLINE,
-        TextStyle {
-            font_size: fonts::TAGLINE_PX,
-            line_height: tagline_line,
-            color: [
-                tokens::TEXT_DIM[0],
-                tokens::TEXT_DIM[1],
-                tokens::TEXT_DIM[2],
-                0xff,
-            ],
-            family: TextFamily::Body,
-        },
-        [tagline_w, tagline_h],
-    );
-
-    let mode = mode_button(renderer, pointer.hovered == Some(MODE_BTN));
-    let mode_w = mode.size[0];
-
-    let column = Stack::column()
-        .with_gap(28.0)
-        .with_cross_align(CrossAlign::Center)
-        .with_children(vec![logo_node, wordmark, meta, tagline, mode]);
-
-    // Intrinsic content height — the column packs from main-axis start; the
-    // outer hero wrapper centers it vertically via flex spacers.
-    let content_h = 64.0 + 28.0 + wordmark_h + 28.0 + meta_h + 28.0 + tagline_h + 28.0 + 56.0;
-    let content = Node::stack([mode_w, content_h], column);
-
-    let wrapper = Stack::column()
-        .with_padding(EdgeInsets::symmetric(56.0, 40.0))
-        .with_cross_align(CrossAlign::Center)
-        .with_children(vec![spacer(1.0), content, spacer(1.0)]);
-    Node {
-        size: [0.0, 0.0],
-        flex: Some(1.0),
-        kind: NodeKind::Stack(wrapper),
-        id: None,
-    }
-}
-
-fn mode_button(renderer: &mut Renderer, hovered: bool) -> Node {
+fn launcher_button(
+    renderer: &mut Renderer,
+    kind: ModuleKind,
+    kind_index: usize,
+    hovered: bool,
+) -> Node {
     let bg = if hovered {
         outlined(tokens::SURFACE_HOVER, 1.0, tokens::ACCENT, 1.0, radii::LG)
     } else {
@@ -452,22 +518,22 @@ fn mode_button(renderer: &mut Renderer, hovered: bool) -> Node {
 
     let icon = text_node(
         renderer,
-        MODE_ICON,
+        kind.icon(),
         TextFamily::Mono,
         15.0,
         tokens::ACCENT,
         0xff,
     );
     let icon_box = Node::stack(
-        [28.0, 28.0],
+        [LAUNCHER_ICON_BOX, LAUNCHER_ICON_BOX],
         Stack::row()
             .with_cross_align(CrossAlign::Center)
-            .with_children(vec![spacer(1.0), icon, spacer(1.0)]),
+            .with_children([spacer(1.0), icon, spacer(1.0)]),
     );
 
     let name = text_node(
         renderer,
-        MODE_NAME,
+        kind.name(),
         TextFamily::Body,
         14.0,
         tokens::TEXT,
@@ -475,53 +541,174 @@ fn mode_button(renderer: &mut Renderer, hovered: bool) -> Node {
     );
     let sub = text_node(
         renderer,
-        MODE_SUB,
+        kind.description(),
         TextFamily::Mono,
         fonts::MODE_SUB_PX,
         tokens::TEXT_DIM,
         0xff,
     );
-    let body_h = name.size[1] + 2.0 + sub.size[1];
     let body_w = name.size[0].max(sub.size[0]);
+    let body_h = name.size[1] + 2.0 + sub.size[1];
     let body = Node::stack(
         [body_w, body_h],
-        Stack::column().with_gap(2.0).with_children(vec![name, sub]),
+        Stack::column().with_gap(2.0).with_children([name, sub]),
     );
 
-    let kbd_label = text_node(
+    let outer_w = (LAUNCHER_CHROME_W + body_w).max(LAUNCHER_MIN_W);
+
+    let row = Stack::row()
+        .with_gap(LAUNCHER_BODY_GAP)
+        .with_padding(EdgeInsets::symmetric(LAUNCHER_PAD_V, LAUNCHER_PAD_H))
+        .with_cross_align(CrossAlign::Center)
+        .with_background(bg)
+        .with_children([icon_box, body, spacer(1.0)]);
+    Node::stack([outer_w, LAUNCHER_OUTER_H], row).with_id(launcher_node_id(kind_index))
+}
+
+fn hero_home(renderer: &mut Renderer, logo: ImageId, pointer: &PointerState) -> Node {
+    let logo_node = Node::image(
+        [LOGO_HERO_SIZE, LOGO_HERO_SIZE],
+        ImageStyle::new(logo).with_radius(radii::LOGO),
+    );
+    let wordmark = text_node(
         renderer,
-        MODE_KBD,
+        WORDMARK,
+        TextFamily::Display,
+        fonts::WORDMARK_PX,
+        tokens::TEXT,
+        0xff,
+    );
+    let meta = text_node(
+        renderer,
+        META_TEMPLATE,
         TextFamily::Mono,
-        fonts::KBD_PX,
+        fonts::FOOTER_PX,
+        tokens::TEXT_FAINT,
+        0xff,
+    );
+
+    let tagline = hero_tagline(renderer);
+    let tagline_h = tagline.size[1];
+    let wordmark_h = wordmark.size[1];
+    let meta_h = meta.size[1];
+
+    let launchers: Vec<Node> = ModuleKind::ALL
+        .iter()
+        .copied()
+        .enumerate()
+        .map(|(idx, kind)| {
+            let hovered = pointer.hovered == Some(launcher_node_id(idx));
+            launcher_button(renderer, kind, idx, hovered)
+        })
+        .collect();
+    let launcher_h: f32 = launchers.iter().map(|n| n.size[1]).sum();
+    let launcher_w: f32 = launchers.iter().map(|n| n.size[0]).fold(0.0, f32::max);
+    #[allow(
+        clippy::cast_precision_loss,
+        reason = "ModuleKind::ALL is single-digit at v0.1"
+    )]
+    let launcher_gaps = LAUNCHER_ITEM_GAP * launchers.len().saturating_sub(1) as f32;
+    let launcher_stack_h = launcher_h + launcher_gaps;
+    let launcher_stack = Node::stack(
+        [launcher_w, launcher_stack_h],
+        Stack::column()
+            .with_gap(LAUNCHER_ITEM_GAP)
+            .with_children(launchers),
+    );
+
+    let column = Stack::column()
+        .with_gap(HERO_ITEM_GAP)
+        .with_cross_align(CrossAlign::Center)
+        .with_children([logo_node, wordmark, meta, tagline, launcher_stack]);
+
+    let content_h = HERO_FIXED_H + wordmark_h + meta_h + tagline_h + launcher_stack_h;
+    let content = Node::stack([launcher_w, content_h], column);
+    hero_wrapper(content)
+}
+
+fn hero_tagline(renderer: &mut Renderer) -> Node {
+    let line_height = fonts::TAGLINE_PX * TAGLINE_LINE_MULT;
+    let natural = renderer.measure_text(TextFamily::Body, TAGLINE, fonts::TAGLINE_PX, line_height);
+    let wraps = natural[0] > TAGLINE_MAX_W;
+    let width = natural[0].min(TAGLINE_MAX_W);
+    let height = if wraps {
+        line_height * 2.0
+    } else {
+        line_height
+    };
+    Node::text_sized(
+        TAGLINE,
+        TextStyle {
+            font_size: fonts::TAGLINE_PX,
+            line_height,
+            color: with_alpha(tokens::TEXT_DIM, 0xff),
+            family: TextFamily::Body,
+        },
+        [width, height],
+    )
+}
+
+fn hero_wrapper(content: Node) -> Node {
+    let wrapper = Stack::column()
+        .with_padding(EdgeInsets::symmetric(HERO_PAD_V, HERO_PAD_H))
+        .with_cross_align(CrossAlign::Center)
+        .with_children([spacer(1.0), content, spacer(1.0)]);
+    Node {
+        size: [0.0; 2],
+        flex: Some(1.0),
+        kind: NodeKind::Stack(wrapper),
+        id: None,
+    }
+}
+
+fn hero_tab_stub(renderer: &mut Renderer, inst: &ModuleInstance) -> Node {
+    let header = text_node(
+        renderer,
+        &format!("Module · {}", inst.kind.name()),
+        TextFamily::Mono,
+        fonts::FOOTER_PX,
+        tokens::TEXT_FAINT,
+        0xff,
+    );
+    let name = text_node(
+        renderer,
+        &inst.name,
+        TextFamily::Display,
+        fonts::WORDMARK_PX,
+        tokens::TEXT,
+        0xff,
+    );
+    let stub = text_node(
+        renderer,
+        "stub scene — Parallex grid lands at S6",
+        TextFamily::Mono,
+        fonts::MODE_SUB_PX,
         tokens::TEXT_DIM,
         0xff,
     );
-    let kbd_w = kbd_label.size[0] + 16.0;
-    let kbd = Node::stack(
-        [kbd_w, kbd_label.size[1] + 6.0],
-        Stack::row()
-            .with_padding(EdgeInsets::symmetric(3.0, 8.0))
+
+    let items = [header, name, stub];
+    let total_h: f32 = items.iter().map(|n| n.size[1]).sum();
+    let max_w: f32 = items.iter().map(|n| n.size[0]).fold(150.0, f32::max);
+
+    let content = Node::stack(
+        [max_w, total_h + STUB_GAPS_H],
+        Stack::column()
+            .with_gap(STUB_ITEM_GAP)
             .with_cross_align(CrossAlign::Center)
-            .with_background(outlined(
-                tokens::SURFACE_BASE,
-                0.0,
-                tokens::TEXT,
-                tokens::CREAM_09_A,
-                radii::SM,
-            ))
-            .with_children(vec![kbd_label]),
+            .with_children(items),
     );
+    hero_wrapper(content)
+}
 
-    let row = Stack::row()
-        .with_gap(14.0)
-        .with_padding(EdgeInsets::symmetric(14.0, 16.0))
-        .with_cross_align(CrossAlign::Center)
-        .with_background(bg)
-        .with_children(vec![icon_box, body, spacer(1.0), kbd]);
-
-    let outer_w = 16.0 + 28.0 + 14.0 + body_w + 14.0 + 80.0 + 14.0 + kbd_w + 16.0;
-    let outer_h = 14.0_f32.mul_add(2.0, 28.0);
-    Node::stack([outer_w.max(360.0), outer_h], row).with_id(MODE_BTN)
+fn hero(renderer: &mut Renderer, logo: ImageId, set: &InstanceSet, pointer: &PointerState) -> Node {
+    match set.selected() {
+        Selection::Home => hero_home(renderer, logo, pointer),
+        Selection::Tab(id) => match set.get(id) {
+            Some(inst) => hero_tab_stub(renderer, inst),
+            None => hero_home(renderer, logo, pointer),
+        },
+    }
 }
 
 // ===== Footer =====
@@ -535,8 +722,9 @@ fn footer_chip(renderer: &mut Renderer, chip: &Hotkey) -> Node {
         tokens::TEXT_DIM,
         0xff,
     );
+    let [label_w, label_h] = kbd_label.size;
     let kbd = Node::stack(
-        [kbd_label.size[0] + 10.0, kbd_label.size[1] + 2.0],
+        [label_w + 10.0, label_h + 2.0],
         Stack::row()
             .with_padding(EdgeInsets::symmetric(1.0, 5.0))
             .with_cross_align(CrossAlign::Center)
@@ -547,9 +735,8 @@ fn footer_chip(renderer: &mut Renderer, chip: &Hotkey) -> Node {
                 tokens::CREAM_09_A,
                 radii::SM,
             ))
-            .with_children(vec![kbd_label]),
+            .with_children([kbd_label]),
     );
-
     let label = text_node(
         renderer,
         chip.label,
@@ -558,46 +745,28 @@ fn footer_chip(renderer: &mut Renderer, chip: &Hotkey) -> Node {
         tokens::TEXT_FAINT,
         0xff,
     );
-    let kbd_w = kbd.size[0];
-    let kbd_h = kbd.size[1];
-    let label_w = label.size[0];
-    let label_h = label.size[1];
-
-    let row = Stack::row()
-        .with_gap(7.0)
-        .with_cross_align(CrossAlign::Center)
-        .with_children(vec![kbd, label]);
-    Node::stack([kbd_w + 7.0 + label_w, row_height(&[kbd_h, label_h])], row)
-}
-
-fn row_height(heights: &[f32]) -> f32 {
-    let mut h: f32 = 0.0;
-    for &v in heights {
-        if v > h {
-            h = v;
-        }
-    }
-    h
+    let [k_w, k_h] = kbd.size;
+    let [l_w, l_h] = label.size;
+    Node::stack(
+        [k_w + FOOTER_CHIP_GAP + l_w, k_h.max(l_h)],
+        Stack::row()
+            .with_gap(FOOTER_CHIP_GAP)
+            .with_cross_align(CrossAlign::Center)
+            .with_children([kbd, label]),
+    )
 }
 
 fn footer(renderer: &mut Renderer) -> Node {
-    let mut children: Vec<Node> = Vec::with_capacity(HOTKEYS.len());
-    for chip in HOTKEYS {
-        children.push(footer_chip(renderer, chip));
-    }
-
+    let chips = HOTKEYS.iter().map(|chip| footer_chip(renderer, chip));
+    let children = std::iter::once(spacer(1.0))
+        .chain(chips)
+        .chain(std::iter::once(spacer(1.0)));
     let row = Stack::row()
-        .with_gap(22.0)
+        .with_gap(FOOTER_ROW_GAP)
         .with_padding(EdgeInsets::all(14.0))
         .with_cross_align(CrossAlign::Center)
         .with_background(flat(tokens::SURFACE_RAISED, 1.0))
-        .with_children(
-            vec![spacer(1.0)]
-                .into_iter()
-                .chain(children)
-                .chain(std::iter::once(spacer(1.0)))
-                .collect(),
-        );
+        .with_children(children);
     Node::stack([0.0, FOOTER_H], row)
 }
 
@@ -607,23 +776,24 @@ fn build_root(
     renderer: &mut Renderer,
     logo: ImageId,
     viewport: [f32; 2],
+    set: &InstanceSet,
     pointer: &PointerState,
-    selected: NodeId,
 ) -> Stack {
-    let titlebar_n = titlebar(renderer, logo);
-    let subway_n = subway(renderer, pointer, selected);
-    let hero_n = hero(renderer, logo, pointer);
-    let footer_n = footer(renderer);
-    let divider_a = divider(viewport[0]);
-    let divider_b = divider(viewport[0]);
-    let divider_c = divider(viewport[0]);
-
+    let title = title_for(set.selected(), set);
     Stack::column()
         .with_background(flat(tokens::SURFACE_BASE, 1.0))
-        .with_children(vec![
-            titlebar_n, divider_a, subway_n, divider_b, hero_n, divider_c, footer_n,
+        .with_children([
+            titlebar(renderer, logo, &title),
+            divider(viewport[0]),
+            subway(renderer, logo, set, pointer),
+            divider(viewport[0]),
+            hero(renderer, logo, set, pointer),
+            divider(viewport[0]),
+            footer(renderer),
         ])
 }
+
+// ===== App wiring =====
 
 fn main() -> Result<()> {
     tracing_subscriber::fmt()
@@ -631,10 +801,8 @@ fn main() -> Result<()> {
             EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("info")),
         )
         .init();
-
     let event_loop = EventLoop::new().context("event_loop init failed")?;
     event_loop.set_control_flow(ControlFlow::Poll);
-
     let mut app = HomeApp::default();
     event_loop
         .run_app(&mut app)
@@ -647,14 +815,12 @@ struct HomeApp {
     window: Option<Arc<Window>>,
     renderer: Option<Renderer>,
     pointer: PointerState,
-    selected: NodeId,
+    set: InstanceSet,
     scale: f32,
     physical_size: [u32; 2],
     hit_zones: Vec<HitZone>,
     logo: Option<ImageId>,
 }
-
-const LOGO_PNG: &[u8] = include_bytes!("../../../assets/januas-ade-logo.png");
 
 impl HomeApp {
     fn rebuild_and_upload(&mut self) {
@@ -669,8 +835,8 @@ impl HomeApp {
             renderer,
             logo,
             [logical_w, logical_h],
+            &self.set,
             &self.pointer,
-            self.selected,
         );
         let mut frame = januas_ui::layout(&root, [logical_w, logical_h]);
         frame.scale_by(self.scale);
@@ -678,6 +844,86 @@ impl HomeApp {
         renderer.set_text_runs(&frame.texts);
         renderer.set_images(&frame.images);
         self.hit_zones = frame.hit_zones;
+    }
+
+    fn handle_click(&mut self, id: NodeId) {
+        let Some(action) = classify_click(id) else {
+            return;
+        };
+        if self.apply(action) {
+            self.rebuild_and_upload();
+        }
+    }
+
+    /// Apply a click action to set state. Returns `true` when something
+    /// actually changed (cheap-out on identity clicks so we don't repaint
+    /// for no reason).
+    fn apply(&mut self, action: ClickAction) -> bool {
+        match action {
+            ClickAction::SelectHome => {
+                if self.set.selected() == Selection::Home {
+                    return false;
+                }
+                let _ = self.set.select(Selection::Home);
+                true
+            }
+            ClickAction::SpawnAndSelect(kind) => {
+                let id = self.set.spawn(kind);
+                let _ = self.set.select(Selection::Tab(id));
+                true
+            }
+            ClickAction::SelectTab(id) => {
+                if self.set.selected() == Selection::Tab(id) {
+                    return false;
+                }
+                let _ = self.set.select(Selection::Tab(id));
+                true
+            }
+            ClickAction::CloseTab(id) => self.set.close(id).is_ok(),
+        }
+    }
+}
+
+/// Discriminated meaning of a click on a hit-tested [`NodeId`].
+///
+/// Separates "what part of the UI was clicked" from "what should happen to
+/// state" so the dispatch table reads as an exhaustive match instead of an
+/// `if`-chain with `return`s.
+#[derive(Copy, Clone, Debug, PartialEq, Eq)]
+enum ClickAction {
+    /// Return to the Home view.
+    SelectHome,
+    /// Spawn a fresh instance of the given module and select its new tab.
+    /// Drives both the `+` button (defaulting to the first registered kind
+    /// at v0.1) and the Home-scene launcher buttons.
+    SpawnAndSelect(ModuleKind),
+    /// Switch the selection to an existing tab.
+    SelectTab(InstanceId),
+    /// Close an existing tab. Selection snaps to Home if the closed tab
+    /// was the active one (`InstanceSet::close` enforces that).
+    CloseTab(InstanceId),
+}
+
+fn classify_click(id: NodeId) -> Option<ClickAction> {
+    // Close zone wins over the tab zone via reverse-painter hit-test, but
+    // belt-and-suspenders the discriminator here too so dispatch is
+    // self-describing.
+    if let Some(instance) = try_tab_close_id(id) {
+        return Some(ClickAction::CloseTab(instance));
+    }
+    if id == HOME_BTN {
+        Some(ClickAction::SelectHome)
+    } else if id == TAB_ADD {
+        // v0.1: only one module registered, so `+` is a one-click spawn.
+        // S5.5e.5 will swap this for a ModuleKind dropdown menu.
+        ModuleKind::ALL
+            .first()
+            .copied()
+            .map(ClickAction::SpawnAndSelect)
+    } else if let Some(kind) = try_launcher_kind(id) {
+        Some(ClickAction::SpawnAndSelect(kind))
+    } else {
+        try_tab_id(id).map(ClickAction::SelectTab)
     }
 }
 
@@ -692,11 +938,6 @@ impl ApplicationHandler for HomeApp {
                 DEFAULT_LOGICAL_W,
                 DEFAULT_LOGICAL_H,
             ));
-        // macOS unified-titlebar pattern (Warp / VS Code / Linear-desktop):
-        // keep the titlebar PRESENT so AppKit keeps drawing the native
-        // traffic-light buttons, but make its background transparent and
-        // extend our content view up under it. `titlebar_hidden(true)`
-        // hides the buttons too — wrong knob.
         #[cfg(target_os = "macos")]
         let attrs = attrs
             .with_titlebar_transparent(true)
@@ -718,7 +959,6 @@ impl ApplicationHandler for HomeApp {
                 return;
             }
         };
-
         let logo = match renderer.load_image_png(LOGO_PNG) {
             Ok(id) => id,
             Err(e) => {
@@ -727,17 +967,15 @@ impl ApplicationHandler for HomeApp {
                 return;
             }
         };
-
         let physical = window.inner_size();
         #[allow(clippy::cast_possible_truncation)]
         let scale = window.scale_factor() as f32;
         self.physical_size = [physical.width.max(1), physical.height.max(1)];
         self.scale = if scale > 0.0 { scale } else { 1.0 };
-
         self.renderer = Some(renderer);
         self.window = Some(window);
         self.logo = Some(logo);
-        self.selected = TAB_PERSONAL;
+        self.set = InstanceSet::new();
         self.rebuild_and_upload();
     }
 
@@ -785,10 +1023,7 @@ impl ApplicationHandler for HomeApp {
                 ..
             } => {
                 if let Some(id) = self.pointer.hovered {
-                    if is_tab(id) && self.selected != id {
-                        self.selected = id;
-                        self.rebuild_and_upload();
-                    }
+                    self.handle_click(id);
                 }
             }
             WindowEvent::RedrawRequested => {
@@ -804,11 +1039,4 @@ impl ApplicationHandler for HomeApp {
             _ => {}
         }
     }
-}
-
-const fn is_tab(id: NodeId) -> bool {
-    matches!(
-        id,
-        TAB_PERSONAL | TAB_DEV | TAB_OSS | TAB_FIVEM | TAB_SCRATCH
-    )
 }
