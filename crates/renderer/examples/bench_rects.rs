@@ -196,8 +196,6 @@ fn main() -> Result<()> {
     let secs = elapsed.as_secs_f64();
     let fps = f64::from(FRAMES) / secs;
     info!(frames = FRAMES, secs = secs, fps = fps, "bench complete");
-    println!(
-        "bench_rects: {FRAMES} frames in {secs:.3}s → {fps:.0} fps (target ≥1000)"
-    );
+    println!("bench_rects: {FRAMES} frames in {secs:.3}s → {fps:.0} fps (target ≥1000)");
     Ok(())
 }

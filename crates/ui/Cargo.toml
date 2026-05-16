@@ -1,0 +1,26 @@
+[package]
+name = "januas-ui"
+version = "0.0.0"
+description = "Januas ADE — layout primitives + pointer state (S5.5b, S5.5c)"
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+
+[lints]
+workspace = true
+
+[dependencies]
+januas-renderer = { version = "0.0.0", path = "../renderer" }
+
+[dev-dependencies]
+anyhow = "1.0.102"
+pollster = "0.4.0"
+tracing = "0.1.44"
+tracing-subscriber = { version = "0.3.23", features = ["env-filter"] }
+winit = "0.30.13"
+
+[[example]]
+name = "home_compose"
+path = "examples/home_compose.rs"

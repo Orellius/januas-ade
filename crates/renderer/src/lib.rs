@@ -14,8 +14,10 @@
 #![doc(html_no_source)]
 
 mod rect;
+mod text;
 
 pub use rect::{Rect, RectPipeline};
+pub use text::TextRun;
 
 use std::sync::Arc;
 use std::time::Instant;
@@ -32,6 +34,10 @@ use winit::window::Window;
 const INITIAL_TEXT: &str = "januas · spawning shell";
 const FONT_SIZE: f32 = 16.0;
 const LINE_HEIGHT: f32 = 20.0;
+/// Default top-left inset for the legacy single-buffer [`Renderer::set_text`]
+/// path. Matches the historical S2/S3 baseline.
+const DEFAULT_TEXT_LEFT: f32 = 32.0;
+const DEFAULT_TEXT_TOP: f32 = 32.0;
 /// Rolling-window length (in frames) before the FPS counter logs.
 const FPS_REPORT_INTERVAL_FRAMES: u32 = 600;
 
@@ -68,7 +74,11 @@ pub struct Renderer {
     viewport: Viewport,
     atlas: TextAtlas,
     text_renderer: TextRenderer,
-    buffer: Buffer,
+    /// Parallel arrays. `buffers[i]` is the shaped `cosmic-text` buffer for
+    /// `runs[i]`; slots are reused across `set_text_runs` calls when the
+    /// run count is stable.
+    buffers: Vec<Buffer>,
+    runs: Vec<TextRun>,
 
     rect_pipeline: RectPipeline,
 
@@ -93,6 +103,10 @@ impl Renderer {
     /// Returns an error if the GPU instance cannot create a surface, no
     /// adapter is available, the device request fails, or the text pipeline
     /// fails to construct.
+    #[allow(
+        clippy::too_many_lines,
+        reason = "linear surface + device + text + rect bring-up; splitting hurts readability more than it helps"
+    )]
     pub fn new(window: Arc<Window>) -> Result<Self> {
         let size = window.inner_size();
         let width = size.width.max(1);
@@ -166,20 +180,31 @@ impl Renderer {
         let text_renderer =
             TextRenderer::new(&mut atlas, &device, wgpu::MultisampleState::default(), None);
 
-        let mut buffer = Buffer::new(&mut font_system, Metrics::new(FONT_SIZE, LINE_HEIGHT));
         #[allow(clippy::cast_precision_loss)]
         let buf_w = width as f32;
         #[allow(clippy::cast_precision_loss)]
         let buf_h = height as f32;
-        buffer.set_size(&mut font_system, Some(buf_w), Some(buf_h));
-        buffer.set_text(
+
+        let initial_run = TextRun {
+            pos: [DEFAULT_TEXT_LEFT, DEFAULT_TEXT_TOP],
+            content: INITIAL_TEXT.to_string(),
+            font_size: FONT_SIZE,
+            line_height: LINE_HEIGHT,
+            color: [TEXT_R, TEXT_G, TEXT_B, 0xff],
+        };
+        let mut initial_buffer = Buffer::new(
             &mut font_system,
-            INITIAL_TEXT,
+            Metrics::new(initial_run.font_size, initial_run.line_height),
+        );
+        initial_buffer.set_size(&mut font_system, Some(buf_w), Some(buf_h));
+        initial_buffer.set_text(
+            &mut font_system,
+            &initial_run.content,
             &Attrs::new(),
             Shaping::Advanced,
             None,
         );
-        buffer.shape_until_scroll(&mut font_system, false);
+        initial_buffer.shape_until_scroll(&mut font_system, false);
 
         let rect_pipeline = RectPipeline::new(&device, format, [buf_w, buf_h]);
 
@@ -193,7 +218,8 @@ impl Renderer {
             viewport,
             atlas,
             text_renderer,
-            buffer,
+            buffers: vec![initial_buffer],
+            runs: vec![initial_run],
             rect_pipeline,
             text_dirty: true,
             frame_count: 0,
@@ -210,20 +236,73 @@ impl Renderer {
             .set_rects(&self.device, &self.queue, rects);
     }
 
-    /// Replace the buffer's text content. Marks the prepared vertices dirty.
+    /// Replace the renderer's text content with a single span at the legacy
+    /// `(32, 32)` inset. Wraps [`Self::set_text_runs`] for the shell-snapshot
+    /// hot path; layout-driven callers should use `set_text_runs` directly.
     pub fn set_text(&mut self, content: &str) {
-        self.buffer.set_text(
-            &mut self.font_system,
-            content,
-            &Attrs::new(),
-            Shaping::Advanced,
-            None,
-        );
-        self.buffer.shape_until_scroll(&mut self.font_system, false);
+        // Fast path when we already have exactly one slot: avoid reallocating
+        // the run Vec on every shell-snapshot frame.
+        if self.buffers.len() == 1 && self.runs.len() == 1 {
+            let buf = &mut self.buffers[0];
+            buf.set_text(
+                &mut self.font_system,
+                content,
+                &Attrs::new(),
+                Shaping::Advanced,
+                None,
+            );
+            buf.shape_until_scroll(&mut self.font_system, false);
+            self.runs[0].content = content.to_string();
+            self.text_dirty = true;
+            return;
+        }
+        self.set_text_runs(&[TextRun {
+            pos: [DEFAULT_TEXT_LEFT, DEFAULT_TEXT_TOP],
+            content: content.to_string(),
+            font_size: FONT_SIZE,
+            line_height: LINE_HEIGHT,
+            color: [TEXT_R, TEXT_G, TEXT_B, 0xff],
+        }]);
+    }
+
+    /// Replace the renderer's text content with N positioned spans. Reuses
+    /// existing `cosmic-text` buffer slots when the new count fits; grows or
+    /// truncates the buffer Vec as needed.
+    pub fn set_text_runs(&mut self, runs: &[TextRun]) {
+        #[allow(clippy::cast_precision_loss)]
+        let buf_w = self.config.width as f32;
+        #[allow(clippy::cast_precision_loss)]
+        let buf_h = self.config.height as f32;
+
+        while self.buffers.len() < runs.len() {
+            let placeholder = Metrics::new(FONT_SIZE, LINE_HEIGHT);
+            self.buffers
+                .push(Buffer::new(&mut self.font_system, placeholder));
+        }
+        self.buffers.truncate(runs.len());
+
+        for (buf, run) in self.buffers.iter_mut().zip(runs.iter()) {
+            buf.set_metrics(
+                &mut self.font_system,
+                Metrics::new(run.font_size, run.line_height),
+            );
+            buf.set_size(&mut self.font_system, Some(buf_w), Some(buf_h));
+            buf.set_text(
+                &mut self.font_system,
+                &run.content,
+                &Attrs::new(),
+                Shaping::Advanced,
+                None,
+            );
+            buf.shape_until_scroll(&mut self.font_system, false);
+        }
+
+        self.runs = runs.to_vec();
         self.text_dirty = true;
     }
 
-    /// Resize the GPU surface and text buffer. Zero-sized inputs are ignored.
+    /// Resize the GPU surface, every text buffer, and the rect-pipeline
+    /// viewport uniform. Zero-sized inputs are ignored.
     pub fn resize(&mut self, width: u32, height: u32) {
         if width == 0 || height == 0 {
             return;
@@ -235,8 +314,9 @@ impl Renderer {
         let w = width as f32;
         #[allow(clippy::cast_precision_loss)]
         let h = height as f32;
-        self.buffer
-            .set_size(&mut self.font_system, Some(w), Some(h));
+        for buf in &mut self.buffers {
+            buf.set_size(&mut self.font_system, Some(w), Some(h));
+        }
         self.rect_pipeline.resize(&self.queue, [w, h]);
         self.text_dirty = true;
     }
@@ -247,6 +327,10 @@ impl Renderer {
     ///
     /// Returns an error if acquiring the next swapchain texture or preparing
     /// the text pipeline fails.
+    #[allow(
+        clippy::too_many_lines,
+        reason = "linear frame loop: prepare → acquire → encode → submit → present → trim → fps. Splitting fragments the dataflow."
+    )]
     pub fn render(&mut self) -> Result<()> {
         if self.text_dirty {
             self.viewport.update(
@@ -257,6 +341,32 @@ impl Renderer {
                 },
             );
 
+            #[allow(clippy::cast_possible_wrap)]
+            let bounds = TextBounds {
+                left: 0,
+                top: 0,
+                right: self.config.width as i32,
+                bottom: self.config.height as i32,
+            };
+            let areas: Vec<TextArea<'_>> = self
+                .buffers
+                .iter()
+                .zip(self.runs.iter())
+                .map(|(buffer, run)| TextArea {
+                    buffer,
+                    left: run.pos[0],
+                    top: run.pos[1],
+                    scale: 1.0,
+                    bounds,
+                    default_color: GlyphColor::rgba(
+                        run.color[0],
+                        run.color[1],
+                        run.color[2],
+                        run.color[3],
+                    ),
+                    custom_glyphs: &[],
+                })
+                .collect();
             self.text_renderer
                 .prepare(
                     &self.device,
@@ -264,22 +374,7 @@ impl Renderer {
                     &mut self.font_system,
                     &mut self.atlas,
                     &self.viewport,
-                    [TextArea {
-                        buffer: &self.buffer,
-                        left: 32.0,
-                        top: 32.0,
-                        scale: 1.0,
-                        bounds: TextBounds {
-                            left: 0,
-                            top: 0,
-                            #[allow(clippy::cast_possible_wrap)]
-                            right: self.config.width as i32,
-                            #[allow(clippy::cast_possible_wrap)]
-                            bottom: self.config.height as i32,
-                        },
-                        default_color: GlyphColor::rgb(TEXT_R, TEXT_G, TEXT_B),
-                        custom_glyphs: &[],
-                    }],
+                    areas,
                     &mut self.swash_cache,
                 )
                 .context("text prepare failed")?;
