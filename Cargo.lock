@@ -827,9 +827,11 @@ name = "januas-renderer"
 version = "0.0.0"
 dependencies = [
  "anyhow",
+ "bytemuck",
  "glyphon",
  "pollster",
  "tracing",
+ "tracing-subscriber",
  "wgpu",
  "winit",
 ]

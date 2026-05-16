@@ -13,6 +13,10 @@
 
 #![doc(html_no_source)]
 
+mod rect;
+
+pub use rect::{Rect, RectPipeline};
+
 use std::sync::Arc;
 use std::time::Instant;
 
@@ -65,6 +69,8 @@ pub struct Renderer {
     atlas: TextAtlas,
     text_renderer: TextRenderer,
     buffer: Buffer,
+
+    rect_pipeline: RectPipeline,
 
     /// `true` when the prepared text vertex buffer is stale and `text_renderer.prepare`
     /// must be called before the next draw. Set on init and on resize.
@@ -175,6 +181,8 @@ impl Renderer {
         );
         buffer.shape_until_scroll(&mut font_system, false);
 
+        let rect_pipeline = RectPipeline::new(&device, format, [buf_w, buf_h]);
+
         Ok(Self {
             surface,
             device,
@@ -186,11 +194,20 @@ impl Renderer {
             atlas,
             text_renderer,
             buffer,
+            rect_pipeline,
             text_dirty: true,
             frame_count: 0,
             window_start: Instant::now(),
             _window: window,
         })
+    }
+
+    /// Replace the current rect scene. Pass `&[]` to clear. Cheap to call
+    /// repeatedly with the same data, but callers should avoid that — the
+    /// uniform/instance upload still costs a `queue.write_buffer`.
+    pub fn set_rects(&mut self, rects: &[Rect]) {
+        self.rect_pipeline
+            .set_rects(&self.device, &self.queue, rects);
     }
 
     /// Replace the buffer's text content. Marks the prepared vertices dirty.
@@ -220,6 +237,7 @@ impl Renderer {
         let h = height as f32;
         self.buffer
             .set_size(&mut self.font_system, Some(w), Some(h));
+        self.rect_pipeline.resize(&self.queue, [w, h]);
         self.text_dirty = true;
     }
 
@@ -313,6 +331,7 @@ impl Renderer {
                 timestamp_writes: None,
                 occlusion_query_set: None,
             });
+            self.rect_pipeline.draw(&mut pass);
             self.text_renderer
                 .render(&self.atlas, &self.viewport, &mut pass)
                 .context("text render failed")?;
