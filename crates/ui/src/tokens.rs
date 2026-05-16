@@ -150,3 +150,52 @@ pub mod motion {
     /// `t.base` — card hover, panel transitions.
     pub const BASE: Duration = Duration::from_millis(220);
 }
+
+/// Width caps from `~/Desktop/Januas/docs/design-scaling.md` §3. Logical
+/// pixels. Centering rule lives at the call site: `min(viewport − 2·gutter,
+/// width.hero.max)`.
+pub mod widths {
+    /// Hero column max-width — ~50ch at the 13.5px body size.
+    pub const HERO_MAX: f32 = 720.0;
+    /// Paragraph max-width — WCAG 1.4.8 sweet spot.
+    pub const PROSE_MAX: f32 = 640.0;
+    /// Mode-button row max-width; centered when viewport allows.
+    pub const MODE_BUTTON_ROW_MAX: f32 = 960.0;
+    /// Minimum horizontal gutter when the hero stretches.
+    pub const VIEWPORT_MIN_GUTTER: f32 = 24.0;
+}
+
+/// Locked window dimensions from `design-scaling.md` §6.
+pub mod window {
+    /// Default open size; matches the v6 mockup target.
+    pub const SIZE_DEFAULT_W: f32 = 1280.0;
+    /// Default open size; matches the v6 mockup target.
+    pub const SIZE_DEFAULT_H: f32 = 800.0;
+    /// Enforced floor; below this the home scene overlaps. Pass to winit
+    /// via `WindowAttributes::with_min_inner_size(LogicalSize::new(..))`.
+    pub const SIZE_MIN_W: f32 = 720.0;
+    /// Enforced floor; see `SIZE_MIN_W`.
+    pub const SIZE_MIN_H: f32 = 480.0;
+}
+
+/// Gaps between sections + tiles. Logical pixels.
+pub mod gaps {
+    /// Vertical divider between chrome sections (titlebar/subway/hero/footer).
+    pub const SECTION: f32 = 1.0;
+    /// Breathing room around the subway home/tabs vertical divider.
+    pub const SUBWAY_DIVIDER: f32 = 8.0;
+    /// Between adjacent tiles in a launcher row or preset grid.
+    pub const TILE: f32 = 12.0;
+}
+
+/// Hit-target floors from `design-scaling.md` §4.
+///
+/// Any `Interactive` node must meet [`MIN`] on both axes, OR sit in a row
+/// with `≥ TARGET` hit band, OR carry `≥ MIN` clearance from every other
+/// interactive node.
+pub mod hit {
+    /// WCAG 2.5.8 floor for any `Interactive` node.
+    pub const MIN: f32 = 24.0;
+    /// Standard-control target (mode buttons, list rows, primary buttons).
+    pub const TARGET: f32 = 28.0;
+}

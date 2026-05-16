@@ -31,8 +31,19 @@ use winit::{
     window::{Window, WindowId},
 };
 
-const DEFAULT_LOGICAL_W: f64 = 1280.0;
-const DEFAULT_LOGICAL_H: f64 = 800.0;
+use januas_ui::tokens::window as window_tokens;
+
+#[allow(
+    clippy::cast_lossless,
+    reason = "winit's LogicalSize takes f64; tokens are f32 logical pixels — the lift is safe"
+)]
+const DEFAULT_LOGICAL_W: f64 = window_tokens::SIZE_DEFAULT_W as f64;
+#[allow(clippy::cast_lossless)]
+const DEFAULT_LOGICAL_H: f64 = window_tokens::SIZE_DEFAULT_H as f64;
+#[allow(clippy::cast_lossless)]
+const MIN_LOGICAL_W: f64 = window_tokens::SIZE_MIN_W as f64;
+#[allow(clippy::cast_lossless)]
+const MIN_LOGICAL_H: f64 = window_tokens::SIZE_MIN_H as f64;
 
 const TITLEBAR_H: f32 = 34.0;
 const SUBWAY_H: f32 = 44.0;
@@ -937,7 +948,11 @@ impl ApplicationHandler for HomeApp {
             .with_inner_size(winit::dpi::LogicalSize::new(
                 DEFAULT_LOGICAL_W,
                 DEFAULT_LOGICAL_H,
-            ));
+            ))
+            // Floor from `design-scaling.md` §6. Below 720×480 the home
+            // scene cannot fit chrome + hero + footer without overlap;
+            // the OS window manager refuses drag-resize below this.
+            .with_min_inner_size(winit::dpi::LogicalSize::new(MIN_LOGICAL_W, MIN_LOGICAL_H));
         #[cfg(target_os = "macos")]
         let attrs = attrs
             .with_titlebar_transparent(true)

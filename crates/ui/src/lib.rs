@@ -25,6 +25,7 @@
 pub use januas_renderer::{ImageId, ImageInstance, Rect, TextFamily, TextRun};
 
 pub mod color;
+pub mod debug;
 mod pointer;
 pub mod tokens;
 
@@ -409,6 +410,12 @@ pub struct LayoutFrame {
     /// Hit-test zones in declaration order — later entries paint on top of
     /// earlier ones, so reverse-iterate to find the topmost hit.
     pub hit_zones: Vec<HitZone>,
+    /// `true` when at least one Stack saw `intrinsic_main > inner_size` and
+    /// its flex children collapsed to zero. Per `design-scaling.md` §5, the
+    /// caller is expected to switch the affected scene to scroll/clip mode.
+    /// At v0.1 this is a signal flag (no scroll container yet); the
+    /// `debug_assert_layout` checks downstream catch the resulting overlaps.
+    pub overflow: bool,
 }
 
 impl LayoutFrame {
@@ -536,6 +543,16 @@ fn place_stack(frame: &mut LayoutFrame, stack: &Stack, origin: [f32; 2], size: [
         } else {
             intrinsic_main += child.size[main_axis];
         }
+    }
+    // Overflow detection: when non-flex siblings + gaps already exceed the
+    // main axis, the leftover is zero and flex spacers collapse to nothing.
+    // Signal the caller via `frame.overflow`; per `design-scaling.md` §5 the
+    // scene-level fix is to switch to scroll/clip. The layout pass itself
+    // continues to place children at their intrinsic sizes — overlap with
+    // siblings of this stack is the consequence, which the next-frame
+    // `debug_assert_layout` walk surfaces as a defect.
+    if intrinsic_main > inner_size[main_axis] {
+        frame.overflow = true;
     }
     let leftover = (inner_size[main_axis] - intrinsic_main).max(0.0);
 
