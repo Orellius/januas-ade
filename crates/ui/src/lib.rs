@@ -1,14 +1,16 @@
-//! Januas UI primitives — layout (S5.5b) + pointer/hover state (S5.5c).
+//! Januas UI primitives — layout (S5.5b), pointer state (S5.5c), tokens +
+//! image nodes (S5.5d).
 //!
 //! Purpose: own the pixel-coordinate layout pass that turns a tree of
 //! [`Stack`] / [`Node`] descriptions into a flat [`LayoutFrame`] of absolute
-//! [`Rect`]s and [`TextRun`]s for the renderer to draw. Children pack along a
-//! row/column main axis with a configurable `gap` and optional `flex` weight;
-//! padding and cross-axis alignment let panels nest without re-implementing
-//! placement math at every call site.
+//! [`Rect`]s, [`TextRun`]s, and [`ImageInstance`]s for the renderer to draw.
+//! Children pack along a row/column main axis with a configurable `gap` and
+//! optional `flex` weight; padding and cross-axis alignment let panels nest
+//! without re-implementing placement math at every call site.
 //! Public surface: [`Stack`], [`Node`], [`NodeKind`], [`CrossAlign`],
 //! [`Direction`], [`EdgeInsets`], [`RectStyle`], [`TextStyle`],
-//! [`LayoutFrame`], [`layout`], [`estimate_text_size`].
+//! [`ImageStyle`], [`LayoutFrame`], [`layout`], [`estimate_text_size`], and
+//! the [`color`] + [`tokens`] sub-modules.
 //! Why this crate (vs a `renderer` module): renderer owns GPU pipelines;
 //! layout is GPU-free pure math that S5.5c (pointer state) and S5.5d (home
 //! scene) compose on top of. Keeping them separate also keeps `renderer`
@@ -20,9 +22,11 @@
 //! non-overlap, padding inset, flex distribution, cross-axis alignment).
 //! Visual correctness is gated by the `home_compose` example at slice close.
 
-pub use januas_renderer::{Rect, TextRun};
+pub use januas_renderer::{ImageId, ImageInstance, Rect, TextFamily, TextRun};
 
+pub mod color;
 mod pointer;
+pub mod tokens;
 
 pub use pointer::{HitZone, NodeId, PointerState, hit_test};
 
@@ -150,6 +154,44 @@ pub struct TextStyle {
     pub line_height: f32,
     /// sRGB rgba — matches `glyphon::Color::rgba`.
     pub color: [u8; 4],
+    /// Generic family — `Body` / `Display` / `Mono`. Maps to a
+    /// `cosmic_text::Family` inside the renderer.
+    pub family: TextFamily,
+}
+
+/// Visual style for a [`NodeKind::Image`].
+///
+/// Images draw through the renderer's texture pipeline. `radius` clips the
+/// sampled texture against a rounded-rect mask in shader; pass `0.0` for a
+/// sharp square. `tint` multiplies the sampled color in linear space — leave
+/// at `[1.0; 4]` to paint the texture verbatim.
+#[derive(Copy, Clone, Debug, PartialEq)]
+pub struct ImageStyle {
+    /// Source image, returned from `januas_renderer::Renderer::load_image`.
+    pub id: ImageId,
+    /// Corner radius in pixels for the rounded-rect mask. `0.0` disables.
+    pub radius: f32,
+    /// Linear-space RGBA tint multiplier. `[1.0; 4]` paints the texture as-is.
+    pub tint: [f32; 4],
+}
+
+impl ImageStyle {
+    /// No clipping, no tint — paint the texture verbatim.
+    #[must_use]
+    pub const fn new(id: ImageId) -> Self {
+        Self {
+            id,
+            radius: 0.0,
+            tint: [1.0; 4],
+        }
+    }
+
+    /// Builder: clip to a rounded-rect mask of the given radius.
+    #[must_use]
+    pub const fn with_radius(mut self, radius: f32) -> Self {
+        self.radius = radius;
+        self
+    }
 }
 
 /// One node in a layout tree. Carries an intrinsic main-axis size plus an
@@ -179,6 +221,8 @@ pub enum NodeKind {
     Rect(RectStyle),
     /// A positioned text span drawn through glyphon.
     Text(TextStyle, String),
+    /// A sampled-texture image drawn through the renderer's image pipeline.
+    Image(ImageStyle),
     /// A nested layout subtree.
     Stack(Stack),
 }
@@ -196,7 +240,10 @@ impl Node {
     }
 
     /// Convenience constructor for a text node sized from
-    /// [`estimate_text_size`].
+    /// [`estimate_text_size`] (monospace approximation).
+    ///
+    /// For pixel-correct sizing under non-monospace families, call
+    /// `januas_renderer::Renderer::measure_text` and use [`Self::text_sized`].
     #[must_use]
     pub fn text(content: impl Into<String>, style: TextStyle) -> Self {
         let content: String = content.into();
@@ -205,6 +252,29 @@ impl Node {
             size,
             flex: None,
             kind: NodeKind::Text(style, content),
+            id: None,
+        }
+    }
+
+    /// Convenience constructor for a text node with a caller-provided size,
+    /// typically the return value of `Renderer::measure_text`.
+    #[must_use]
+    pub fn text_sized(content: impl Into<String>, style: TextStyle, size: [f32; 2]) -> Self {
+        Self {
+            size,
+            flex: None,
+            kind: NodeKind::Text(style, content.into()),
+            id: None,
+        }
+    }
+
+    /// Convenience constructor for an image node at the given size.
+    #[must_use]
+    pub const fn image(size: [f32; 2], style: ImageStyle) -> Self {
+        Self {
+            size,
+            flex: None,
+            kind: NodeKind::Image(style),
             id: None,
         }
     }
@@ -320,24 +390,29 @@ impl Stack {
     }
 }
 
-/// Output of a [`layout`] pass: a flat list of absolutely-positioned rects
-/// and text runs, ready to feed [`januas_renderer::Renderer::set_rects`] and
-/// [`januas_renderer::Renderer::set_text_runs`].
+/// Output of a [`layout`] pass.
+///
+/// A flat list of absolutely-positioned rects, text runs, and image
+/// instances, ready to feed [`januas_renderer::Renderer::set_rects`],
+/// [`januas_renderer::Renderer::set_text_runs`], and
+/// [`januas_renderer::Renderer::set_images`].
 #[derive(Clone, Debug, Default)]
 pub struct LayoutFrame {
     /// Absolutely-positioned rects in declaration order.
     pub rects: Vec<Rect>,
     /// Absolutely-positioned text runs in declaration order.
     pub texts: Vec<TextRun>,
+    /// Absolutely-positioned image instances in declaration order.
+    pub images: Vec<ImageInstance>,
     /// Hit-test zones in declaration order — later entries paint on top of
     /// earlier ones, so reverse-iterate to find the topmost hit.
     pub hit_zones: Vec<HitZone>,
 }
 
 impl LayoutFrame {
-    /// Multiply every position, size, font metric, and hit-zone bound by
-    /// `scale`. Used to convert a logical-pixel layout into the physical
-    /// pixels the renderer surface uses on a `HiDPI` display.
+    /// Multiply every position, size, font metric, image bound, and hit-zone
+    /// bound by `scale`. Used to convert a logical-pixel layout into the
+    /// physical pixels the renderer surface uses on a `HiDPI` display.
     pub fn scale_by(&mut self, scale: f32) {
         for r in &mut self.rects {
             r.pos[0] *= scale;
@@ -355,6 +430,13 @@ impl LayoutFrame {
             t.pos[1] *= scale;
             t.font_size *= scale;
             t.line_height *= scale;
+        }
+        for img in &mut self.images {
+            img.pos[0] *= scale;
+            img.pos[1] *= scale;
+            img.size[0] *= scale;
+            img.size[1] *= scale;
+            img.radius *= scale;
         }
         for z in &mut self.hit_zones {
             z.pos[0] *= scale;
@@ -512,6 +594,16 @@ fn place_node(frame: &mut LayoutFrame, node: &Node, pos: [f32; 2], size: [f32; 2
                 font_size: style.font_size,
                 line_height: style.line_height,
                 color: style.color,
+                family: style.family,
+            });
+        }
+        NodeKind::Image(style) => {
+            frame.images.push(ImageInstance {
+                id: style.id,
+                pos,
+                size,
+                radius: style.radius,
+                tint: style.tint,
             });
         }
         NodeKind::Stack(inner) => {

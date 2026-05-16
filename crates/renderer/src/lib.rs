@@ -13,22 +13,79 @@
 
 #![doc(html_no_source)]
 
+mod image;
 mod rect;
 mod text;
 
+pub use image::{ImageId, ImageInstance, ImagePipeline};
 pub use rect::{Rect, RectPipeline};
-pub use text::TextRun;
+pub use text::{TextFamily, TextRun};
 
 use std::sync::Arc;
 use std::time::Instant;
 
 use anyhow::{Context as _, Result};
 use glyphon::{
-    Attrs, Buffer, Cache, Color as GlyphColor, FontSystem, Metrics, Resolution, Shaping,
+    Attrs, Buffer, Cache, Color as GlyphColor, Family, FontSystem, Metrics, Resolution, Shaping,
     SwashCache, TextArea, TextAtlas, TextBounds, TextRenderer, Viewport,
 };
 use tracing::info;
 use winit::window::Window;
+
+/// Map the renderer-facing [`TextFamily`] enum to the borrowed
+/// `cosmic_text::Family` variant the shaping path consumes.
+const fn family_to_cosmic(family: TextFamily) -> Family<'static> {
+    match family {
+        TextFamily::Body => Family::SansSerif,
+        TextFamily::Display => Family::Serif,
+        TextFamily::Mono => Family::Monospace,
+    }
+}
+
+/// Normalize a decoded PNG frame into a tightly-packed RGBA8 buffer.
+///
+/// `png` returns whatever color type + bit depth the file used after the
+/// `EXPAND` transformation; the image pipeline assumes a `Rgba8UnormSrgb`
+/// texture, so the three common branches (RGBA8, RGB8, grayscale + alpha)
+/// fan in here. Anything else surfaces as an error so callers don't ship a
+/// silently-wrong texture.
+fn png_to_rgba8<R: std::io::Read>(reader: &png::Reader<R>, raw: &[u8]) -> Result<Vec<u8>> {
+    use png::{BitDepth, ColorType};
+    let info = reader.info();
+    if info.bit_depth != BitDepth::Eight {
+        anyhow::bail!(
+            "PNG bit depth {:?} unsupported; only 8-bit channels are wired",
+            info.bit_depth
+        );
+    }
+    #[allow(
+        clippy::cast_possible_truncation,
+        clippy::cast_sign_loss,
+        reason = "u32 × u32 × 4 covers any realistic image footprint"
+    )]
+    let pixels = (info.width as usize) * (info.height as usize);
+    match info.color_type {
+        ColorType::Rgba => Ok(raw.to_vec()),
+        ColorType::Rgb => {
+            let mut out = Vec::with_capacity(pixels * 4);
+            for chunk in raw.chunks_exact(3) {
+                out.extend_from_slice(chunk);
+                out.push(0xff);
+            }
+            Ok(out)
+        }
+        ColorType::GrayscaleAlpha => {
+            let mut out = Vec::with_capacity(pixels * 4);
+            for chunk in raw.chunks_exact(2) {
+                let g = chunk[0];
+                let a = chunk[1];
+                out.extend_from_slice(&[g, g, g, a]);
+            }
+            Ok(out)
+        }
+        other => anyhow::bail!("PNG color type {other:?} unsupported"),
+    }
+}
 
 /// Initial smoke string shown before any shell output arrives.
 const INITIAL_TEXT: &str = "januas · spawning shell";
@@ -81,6 +138,7 @@ pub struct Renderer {
     runs: Vec<TextRun>,
 
     rect_pipeline: RectPipeline,
+    image_pipeline: ImagePipeline,
 
     /// `true` when the prepared text vertex buffer is stale and `text_renderer.prepare`
     /// must be called before the next draw. Set on init and on resize.
@@ -191,6 +249,7 @@ impl Renderer {
             font_size: FONT_SIZE,
             line_height: LINE_HEIGHT,
             color: [TEXT_R, TEXT_G, TEXT_B, 0xff],
+            family: TextFamily::Body,
         };
         let mut initial_buffer = Buffer::new(
             &mut font_system,
@@ -200,13 +259,14 @@ impl Renderer {
         initial_buffer.set_text(
             &mut font_system,
             &initial_run.content,
-            &Attrs::new(),
+            &Attrs::new().family(family_to_cosmic(initial_run.family)),
             Shaping::Advanced,
             None,
         );
         initial_buffer.shape_until_scroll(&mut font_system, false);
 
         let rect_pipeline = RectPipeline::new(&device, format, [buf_w, buf_h]);
+        let image_pipeline = ImagePipeline::new(&device, format, [buf_w, buf_h]);
 
         Ok(Self {
             surface,
@@ -221,11 +281,42 @@ impl Renderer {
             buffers: vec![initial_buffer],
             runs: vec![initial_run],
             rect_pipeline,
+            image_pipeline,
             text_dirty: true,
             frame_count: 0,
             window_start: Instant::now(),
             _window: window,
         })
+    }
+
+    /// Decode a PNG byte buffer and upload it as an RGBA8 texture. Returns
+    /// the [`ImageId`] callers should hold across frames to reference it.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if PNG decoding fails or if the image is not in a
+    /// supported color/bit-depth combination after transformation to RGBA8.
+    pub fn load_image_png(&mut self, png_bytes: &[u8]) -> Result<ImageId> {
+        let decoder = png::Decoder::new(std::io::Cursor::new(png_bytes));
+        let mut reader = decoder.read_info().context("png read_info failed")?;
+        let info = reader.info();
+        let width = info.width;
+        let height = info.height;
+
+        let mut raw = vec![0u8; reader.output_buffer_size()];
+        reader.next_frame(&mut raw).context("png decode failed")?;
+
+        let rgba = png_to_rgba8(&reader, &raw)?;
+        Ok(self
+            .image_pipeline
+            .load_image(&self.device, &self.queue, width, height, &rgba))
+    }
+
+    /// Replace the current image scene. Pass `&[]` to clear. The pipeline
+    /// coalesces consecutive instances sharing an `ImageId` into one draw.
+    pub fn set_images(&mut self, instances: &[ImageInstance]) {
+        self.image_pipeline
+            .set_instances(&self.device, &self.queue, instances);
     }
 
     /// Replace the current rect scene. Pass `&[]` to clear. Cheap to call
@@ -237,17 +328,19 @@ impl Renderer {
     }
 
     /// Replace the renderer's text content with a single span at the legacy
-    /// `(32, 32)` inset. Wraps [`Self::set_text_runs`] for the shell-snapshot
-    /// hot path; layout-driven callers should use `set_text_runs` directly.
+    /// `(32, 32)` inset, family [`TextFamily::Body`]. Wraps
+    /// [`Self::set_text_runs`] for the shell-snapshot hot path; layout-driven
+    /// callers should use `set_text_runs` directly.
     pub fn set_text(&mut self, content: &str) {
         // Fast path when we already have exactly one slot: avoid reallocating
         // the run Vec on every shell-snapshot frame.
         if self.buffers.len() == 1 && self.runs.len() == 1 {
+            let family = self.runs[0].family;
             let buf = &mut self.buffers[0];
             buf.set_text(
                 &mut self.font_system,
                 content,
-                &Attrs::new(),
+                &Attrs::new().family(family_to_cosmic(family)),
                 Shaping::Advanced,
                 None,
             );
@@ -262,6 +355,7 @@ impl Renderer {
             font_size: FONT_SIZE,
             line_height: LINE_HEIGHT,
             color: [TEXT_R, TEXT_G, TEXT_B, 0xff],
+            family: TextFamily::Body,
         }]);
     }
 
@@ -290,7 +384,7 @@ impl Renderer {
             buf.set_text(
                 &mut self.font_system,
                 &run.content,
-                &Attrs::new(),
+                &Attrs::new().family(family_to_cosmic(run.family)),
                 Shaping::Advanced,
                 None,
             );
@@ -299,6 +393,56 @@ impl Renderer {
 
         self.runs = runs.to_vec();
         self.text_dirty = true;
+    }
+
+    /// Shape `content` with the renderer's `FontSystem` and return its visual
+    /// width and height in surface pixels.
+    ///
+    /// Width is the maximum `LayoutRun::line_w` across all wrapped runs;
+    /// height is `lines × line_height` (cosmic-text reports its own
+    /// `line_height` per run, which matches the metrics we feed in). The
+    /// returned size is what the renderer will actually paint, so callers
+    /// can size layout nodes against it for pixel-correct alignment instead
+    /// of the monospace approximation in [`crate::estimate_text_size`].
+    ///
+    /// This routine uses a transient one-line buffer; it does not affect the
+    /// renderer's persistent text state.
+    #[must_use]
+    pub fn measure_text(
+        &mut self,
+        family: TextFamily,
+        content: &str,
+        font_size: f32,
+        line_height: f32,
+    ) -> [f32; 2] {
+        let mut buffer = Buffer::new(&mut self.font_system, Metrics::new(font_size, line_height));
+        buffer.set_size(&mut self.font_system, None, None);
+        buffer.set_text(
+            &mut self.font_system,
+            content,
+            &Attrs::new().family(family_to_cosmic(family)),
+            Shaping::Advanced,
+            None,
+        );
+        buffer.shape_until_scroll(&mut self.font_system, false);
+
+        let mut max_w: f32 = 0.0;
+        let mut lines: u32 = 0;
+        for run in buffer.layout_runs() {
+            if run.line_w > max_w {
+                max_w = run.line_w;
+            }
+            lines += 1;
+        }
+        if lines == 0 {
+            lines = 1;
+        }
+        #[allow(
+            clippy::cast_precision_loss,
+            reason = "lines fits in f32 long before precision matters"
+        )]
+        let h = lines as f32 * line_height;
+        [max_w, h]
     }
 
     /// Resize the GPU surface, every text buffer, and the rect-pipeline
@@ -318,6 +462,7 @@ impl Renderer {
             buf.set_size(&mut self.font_system, Some(w), Some(h));
         }
         self.rect_pipeline.resize(&self.queue, [w, h]);
+        self.image_pipeline.resize(&self.queue, [w, h]);
         self.text_dirty = true;
     }
 
@@ -427,6 +572,7 @@ impl Renderer {
                 occlusion_query_set: None,
             });
             self.rect_pipeline.draw(&mut pass);
+            self.image_pipeline.draw(&mut pass);
             self.text_renderer
                 .render(&self.atlas, &self.viewport, &mut pass)
                 .context("text render failed")?;
