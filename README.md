@@ -2,15 +2,21 @@
   <img src="./assets/januas-ade-logo.png" alt="Januas ADE logo" width="180" />
 </p>
 
-# Januas ADE
+<h1 align="center">Januas ADE</h1>
 
-Native Rust Agentic Development Environment. GPU-rendered terminal multiplexer with wizard-driven setup for AI-coding sessions. Pure Rust, no framework reliance, homegrown ecosystem. 1000 fps render target.
+<p align="center">
+  <em>A native Rust Agentic Development Environment. GPU-rendered terminal multiplexer with wizard-driven setup for AI-coding sessions.</em>
+</p>
+
+<p align="center">
+  Pure Rust. No Tauri, no Electron, no webview, no UI framework. Homegrown ecosystem.
+</p>
 
 Part of the [Januas umbrella](../../CLAUDE.md).
 
 ## Status
 
-**v0.0.0** — slice **S0 (scaffold)**. The full slice list (S0 through S18) lives in [`NORTH_STAR.md`](./NORTH_STAR.md).
+Alpha. Slice **S3** (PTY + single shell) green. The full slice plan (S0 through S18) lives in [`NORTH_STAR.md`](./NORTH_STAR.md). Append-only milestone log in [`docs/CHECKPOINTS.md`](./docs/CHECKPOINTS.md).
 
 ## Build
 
@@ -21,6 +27,8 @@ cargo clippy --all-targets -- -D warnings
 cargo fmt --check
 cargo run --bin januas-ade
 ```
+
+Launches a 1280×800 window with a real shell running inside.
 
 ## License
 
