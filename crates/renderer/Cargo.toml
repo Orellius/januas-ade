@@ -14,7 +14,7 @@ workspace = true
 [dependencies]
 anyhow = "1.0.102"
 bytemuck = { version = "1.19", features = ["derive"] }
-glyphon = "0.11.0"
+januas-glyphon = { version = "0.0.0", path = "../januas-glyphon" }
 png = "0.17.16"
 pollster = "0.4.0"
 tracing = "0.1.44"
@@ -25,6 +25,9 @@ winit = "0.30.13"
 # png added in S5.5d for the image-texture pipeline (the brand logo); chosen
 # over `image` because we only ingest PNG + RGBA and `png` pulls in 1/10th
 # the transitive surface.
+# januas-glyphon (S5.5d.5) is the vendored glyphon-0.11.0 fork that lands the
+# DirectWrite contrast-enhancement curve in its fragment shader — see
+# crates/januas-glyphon/UPSTREAM_NOTES.md for the diff and re-sync recipe.
 
 [dev-dependencies]
 tracing-subscriber = { version = "0.3.23", features = ["env-filter"] }

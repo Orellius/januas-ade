@@ -1,0 +1,28 @@
+[package]
+name = "januas-glyphon"
+description = "Januas-vendored fork of glyphon 0.11.0 with DirectWrite-style contrast enhancement"
+version = "0.0.0"
+edition.workspace = true
+rust-version.workspace = true
+# Upstream glyphon is tri-licensed; we inherit. Apache-2.0 is the dominant
+# choice across the Januas workspace.
+license = "MIT OR Apache-2.0 OR Zlib"
+repository.workspace = true
+authors.workspace = true
+
+[lib]
+name = "januas_glyphon"
+path = "src/lib.rs"
+
+# Vendored upstream code is intentionally exempt from the workspace lint
+# baseline — chasing clippy::pedantic + unsafe_code = deny across glyphon's
+# 1.6 KLoC would balloon the diff and break the re-sync recipe in
+# UPSTREAM_NOTES.md. New code we write goes in `januas-renderer` / `januas-ui`,
+# which DO inherit the workspace lints.
+
+[dependencies]
+wgpu = { version = "29.0.0", default-features = false, features = ["wgsl"] }
+etagere = "0.3.0"
+cosmic-text = "0.18"
+lru = { version = "0.16.2", default-features = false }
+rustc-hash = "2.1.1"
