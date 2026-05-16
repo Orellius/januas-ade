@@ -1,0 +1,16 @@
+[package]
+name = "januas-ade"
+version = "0.0.0"
+description = "Januas ADE — native Rust Agentic Development Environment"
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+
+[lints]
+workspace = true
+
+[[bin]]
+name = "januas-ade"
+path = "src/main.rs"
