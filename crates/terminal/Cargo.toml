@@ -1,0 +1,17 @@
+[package]
+name = "januas-terminal"
+version = "0.0.0"
+description = "Januas ADE — terminal grid model (wraps alacritty_terminal)"
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+
+[lints]
+workspace = true
+
+[dependencies]
+alacritty_terminal = "0.26.0"
+anyhow = "1.0.102"
+tracing = "0.1.44"

@@ -16,8 +16,11 @@ name = "januas-ade"
 path = "src/main.rs"
 
 [dependencies]
+alacritty_terminal = "0.26.0"
 anyhow = "1.0.102"
+januas-pty = { version = "0.0.0", path = "../pty" }
 januas-renderer = { version = "0.0.0", path = "../renderer" }
+januas-terminal = { version = "0.0.0", path = "../terminal" }
 tracing = "0.1.44"
 tracing-subscriber = { version = "0.3.23", features = ["env-filter"] }
 winit = "0.30.13"

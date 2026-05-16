@@ -24,10 +24,10 @@ use glyphon::{
 use tracing::info;
 use winit::window::Window;
 
-/// Hardcoded smoke string for S2. Replaced when the terminal grid lands at S3.
-const SAMPLE_TEXT: &str = "Hello, Januas";
-const FONT_SIZE: f32 = 96.0;
-const LINE_HEIGHT: f32 = 110.0;
+/// Initial smoke string shown before any shell output arrives.
+const INITIAL_TEXT: &str = "Januas ADE — spawning shell…";
+const FONT_SIZE: f32 = 16.0;
+const LINE_HEIGHT: f32 = 20.0;
 /// Rolling-window length (in frames) before the FPS counter logs.
 const FPS_REPORT_INTERVAL_FRAMES: u32 = 600;
 
@@ -154,7 +154,7 @@ impl Renderer {
         buffer.set_size(&mut font_system, Some(buf_w), Some(buf_h));
         buffer.set_text(
             &mut font_system,
-            SAMPLE_TEXT,
+            INITIAL_TEXT,
             &Attrs::new(),
             Shaping::Advanced,
             None,
@@ -177,6 +177,19 @@ impl Renderer {
             window_start: Instant::now(),
             _window: window,
         })
+    }
+
+    /// Replace the buffer's text content. Marks the prepared vertices dirty.
+    pub fn set_text(&mut self, content: &str) {
+        self.buffer.set_text(
+            &mut self.font_system,
+            content,
+            &Attrs::new(),
+            Shaping::Advanced,
+            None,
+        );
+        self.buffer.shape_until_scroll(&mut self.font_system, false);
+        self.text_dirty = true;
     }
 
     /// Resize the GPU surface and text buffer. Zero-sized inputs are ignored.
@@ -245,6 +258,15 @@ impl Renderer {
         let frame = match self.surface.get_current_texture() {
             wgpu::CurrentSurfaceTexture::Success(t)
             | wgpu::CurrentSurfaceTexture::Suboptimal(t) => t,
+            wgpu::CurrentSurfaceTexture::Occluded
+            | wgpu::CurrentSurfaceTexture::Outdated
+            | wgpu::CurrentSurfaceTexture::Timeout => {
+                // Transient: window not visible, configuration stale, or compositor
+                // told us to wait. Skip this frame silently; the event loop's next
+                // RedrawRequested will re-attempt. Logging here at ANY level floods
+                // the log because RedrawRequested fires every loop iteration.
+                return Ok(());
+            }
             other => anyhow::bail!("get_current_texture: {other:?}"),
         };
         let view = frame
