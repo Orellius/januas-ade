@@ -14,3 +14,10 @@ workspace = true
 [[bin]]
 name = "januas-ade"
 path = "src/main.rs"
+
+[dependencies]
+anyhow = "1.0.102"
+januas-renderer = { version = "0.0.0", path = "../renderer" }
+tracing = "0.1.44"
+tracing-subscriber = { version = "0.3.23", features = ["env-filter"] }
+winit = "0.30.13"
