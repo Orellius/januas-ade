@@ -11,3 +11,15 @@ AGENTS.md
 # Working documents. Untracked on purpose: a visibility flip exposes every commit
 # ever made, so a doc deleted from HEAD is still public. README.md is the project.
 docs/
+
+# Working documents. Notes to myself, not documentation. A visibility flip
+# exposes every commit ever made, so a doc deleted from HEAD is still public.
+# docs/ alone was not enough: these four names live at the repo root.
+docs/
+/NORTH_STAR.md
+/PROJECT_STATE.md
+/ROADMAP.md
+/BACKLOG.md
+/checkpoints/
+/plans/
+/internal/
