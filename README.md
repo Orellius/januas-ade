@@ -32,9 +32,7 @@ Launches a 1280×800 window with a real shell running inside.
 
 ## License
 
-Dual-licensed under either of:
+AGPL-3.0. See [LICENSE](LICENSE).
 
-- MIT License ([`LICENSE-MIT`](./LICENSE-MIT))
-- Apache License, Version 2.0 ([`LICENSE-APACHE`](./LICENSE-APACHE))
-
-at your option. Contributions are accepted under the same dual-license terms.
+If you run a modified version as a network service, the AGPL requires you to offer that
+modified source to its users.
