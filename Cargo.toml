@@ -5,7 +5,7 @@ members = ["crates/*"]
 [workspace.package]
 edition = "2024"
 rust-version = "1.87"
-license = "MIT OR Apache-2.0"
+license = "AGPL-3.0-only"
 repository = "https://github.com/Orellius/januas-ade"
 authors = ["Orel Ohayon <42762368+Orellius@users.noreply.github.com>"]
 
