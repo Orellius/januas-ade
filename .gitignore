@@ -7,3 +7,7 @@ Cargo.lock.bak
 CLAUDE.md
 AGENTS.md
 .claude/
+
+# Working documents. Untracked on purpose: a visibility flip exposes every commit
+# ever made, so a doc deleted from HEAD is still public. README.md is the project.
+docs/
